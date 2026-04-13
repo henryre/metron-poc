@@ -42,7 +42,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Parse and merge
         env:
@@ -154,7 +153,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Parse and post feedback to agent's PR
         env:
@@ -284,7 +282,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Parse config
         if: steps.pr.outputs.branch != ''
@@ -391,7 +388,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve issue number
         id: issue

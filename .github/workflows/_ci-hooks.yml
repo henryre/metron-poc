@@ -32,7 +32,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Dispatch repair for CI failure
         env:
@@ -86,7 +85,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Merge pending PRs
         env:
@@ -141,7 +139,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Dispatch repair for deploy failure
         env:
@@ -229,7 +226,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Find PR and post preview + summary
         env:

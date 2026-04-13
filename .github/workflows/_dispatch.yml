@@ -32,7 +32,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Parse config
         id: config
@@ -135,7 +134,6 @@ jobs:
           repository: henryre/metron-poc
           path: .metron
           token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Close all agent PRs for this issue
         env:
