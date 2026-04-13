@@ -12,11 +12,6 @@ on:
         type: string
         default: "metron.toml"
 
-permissions:
-  contents: read
-  actions: read
-  pull-requests: write
-  issues: write
 
 jobs:
   # -----------------------------------------------------------------------
