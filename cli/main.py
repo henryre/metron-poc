@@ -1,4 +1,5 @@
 """Metron CLI — setup multi-agent dev infra for any repo."""
+
 from pathlib import Path
 
 import click
