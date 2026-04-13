@@ -1,0 +1,251 @@
+name: "Metron: Claude Code Agent"
+
+# Reusable workflow — called by target repos on issues.labeled + issue_comment.
+# Runs claude-code-action with config-driven setup, retry, fallback commit, and PR creation.
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: "Path to metron.toml in the calling repo"
+        required: false
+        type: string
+        default: "metron.toml"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issues' && github.event.action == 'labeled') ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: agent-claude-${{ github.event.issue.number }}-${{ github.event.label.name || 'comment' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse config
+        id: config
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 -c "
+          import sys, json
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents, get_build_commands, derive_allowed_tools
+
+          cfg = load_config('${{ inputs.config-path }}')
+          build = get_build_commands(cfg)
+          agents = get_agents(cfg)
+          ready_label = cfg.get('metron', {}).get('ready_label', 'ready-for-dev')
+
+          # Find the first claude agent
+          claude_agent = None
+          for a in agents:
+              if a['harness'] == 'claude':
+                  claude_agent = a
+                  break
+
+          if not claude_agent:
+              print('::error::No Claude agent found in config')
+              sys.exit(1)
+
+          # Derive allowed tools
+          tools = derive_allowed_tools(cfg, claude_agent)
+          tools_str = ' '.join(f\"'Bash({t}:*)'\" for t in tools)
+
+          with open('$GITHUB_OUTPUT', 'a') as f:
+              f.write(f'runtime={build[\"runtime\"]}\n')
+              f.write(f'install={build[\"install\"]}\n')
+              f.write(f'ready_label={ready_label}\n')
+              f.write(f'model_id={claude_agent[\"model_id\"]}\n')
+              f.write(f'branch_prefix={claude_agent[\"branch_prefix\"]}\n')
+              f.write(f'agent_label={claude_agent[\"label\"]}\n')
+              f.write(f'allowed_tools={tools_str}\n')
+          " || { echo "::error::Config parse failed"; exit 1; }
+
+      # Copy metron scripts to /tmp so they survive if the working tree changes
+      - name: Preserve metron scripts
+        run: cp -r .metron/scripts /tmp/_metron_scripts 2>/dev/null || true
+
+      # Check if we should proceed (label matches ready_label for issues events)
+      - name: Check trigger
+        id: trigger
+        run: |
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            if [ "${{ github.event.label.name }}" != "${{ steps.config.outputs.ready_label }}" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      # Runtime setup — conditional on build.runtime
+      - uses: actions/setup-node@v4
+        if: steps.trigger.outputs.skip == 'false' && steps.config.outputs.runtime == 'node'
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - uses: actions/setup-python@v5
+        if: steps.trigger.outputs.skip == 'false' && steps.config.outputs.runtime == 'python'
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.trigger.outputs.skip == 'false' && steps.config.outputs.install != ''
+        run: ${{ steps.config.outputs.install }}
+
+      - name: Close previous PRs
+        if: steps.trigger.outputs.skip == 'false' && github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 /tmp/_metron_scripts/agent_ops.py close-previous-prs \
+            "${{ github.event.issue.number }}" \
+            "${{ steps.config.outputs.branch_prefix }}" \
+            "${{ steps.config.outputs.agent_label }}"
+
+      - name: Run Claude Code (attempt 1)
+        if: steps.trigger.outputs.skip == 'false'
+        id: claude1
+        continue-on-error: true
+        uses: anthropics/claude-code-action@58dbe8ed6879f0d3b02ac295b20d5fdfe7733e0c
+        env:
+          ANTHROPIC_BASE_URL: "https://api.portkey.ai"
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.PORTKEY_API_KEY }}
+          ANTHROPIC_CUSTOM_HEADERS: "x-portkey-api-key: ${{ secrets.PORTKEY_API_KEY }}\nx-portkey-provider: ${{ secrets.PORTKEY_BEDROCK_SLUG }}"
+          ANTHROPIC_MODEL: ${{ steps.config.outputs.model_id }}
+        with:
+          anthropic_api_key: ${{ secrets.PORTKEY_API_KEY }}
+          label_trigger: ${{ steps.config.outputs.ready_label }}
+          allowed_bots: "github-actions[bot]"
+          claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
+
+      - name: Wait before retry
+        if: steps.claude1.outcome == 'failure' && github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
+        run: echo "First attempt failed, waiting 60s..." && sleep 60
+
+      - name: Run Claude Code (attempt 2)
+        if: steps.claude1.outcome == 'failure' && github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
+        id: claude2
+        continue-on-error: true
+        uses: anthropics/claude-code-action@58dbe8ed6879f0d3b02ac295b20d5fdfe7733e0c
+        env:
+          ANTHROPIC_BASE_URL: "https://api.portkey.ai"
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.PORTKEY_API_KEY }}
+          ANTHROPIC_CUSTOM_HEADERS: "x-portkey-api-key: ${{ secrets.PORTKEY_API_KEY }}\nx-portkey-provider: ${{ secrets.PORTKEY_BEDROCK_SLUG }}"
+          ANTHROPIC_MODEL: ${{ steps.config.outputs.model_id }}
+        with:
+          anthropic_api_key: ${{ secrets.PORTKEY_API_KEY }}
+          label_trigger: ${{ steps.config.outputs.ready_label }}
+          allowed_bots: "github-actions[bot]"
+          claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
+
+      - name: Agent diagnostics
+        if: always() && github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: python3 /tmp/_metron_scripts/agent_ops.py diagnostics "${{ steps.config.outputs.agent_label }}"
+
+      - name: Commit and push if Claude didn't
+        if: always() && github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_PREFIX="${{ steps.config.outputs.branch_prefix }}"
+          # Remove trailing slash for prefix matching
+          PREFIX_PATTERN="${BRANCH_PREFIX%/}"
+
+          BRANCH=$(git branch --show-current)
+          if [[ "$BRANCH" != ${PREFIX_PATTERN}/* ]]; then
+            echo "Not on an agent branch ($BRANCH), skipping"
+            exit 0
+          fi
+
+          # If there are uncommitted changes, commit them
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::warning::Claude left uncommitted changes -- committing them"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "feat: implement issue (auto-committed by fallback)"
+          fi
+
+          # Check if branch has commits beyond main
+          LOCAL_COMMITS=$(git log origin/main..HEAD --oneline 2>/dev/null | wc -l)
+          if [ "$LOCAL_COMMITS" -eq 0 ]; then
+            echo "No local commits beyond main, skipping"
+            exit 0
+          fi
+
+          # Check if branch already exists on remote
+          if gh api "repos/${{ github.repository }}/branches/$BRANCH" &>/dev/null; then
+            echo "Branch $BRANCH already on remote"
+            exit 0
+          fi
+
+          # Set up git auth (claude-code-action's cleanup removes its credentials)
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
+          echo "Pushing unpushed branch $BRANCH ($LOCAL_COMMITS commits)..."
+          git push origin "$BRANCH" || echo "::warning::Fallback push failed"
+
+      - name: Create PR and post result
+        if: always() && github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          BRANCH_PREFIX="${{ steps.config.outputs.branch_prefix }}"
+          AGENT_LABEL="${{ steps.config.outputs.agent_label }}"
+
+          # Delete claude[bot] verbose comments
+          gh api "repos/${{ github.repository }}/issues/${ISSUE_NUM}/comments" \
+            --jq '.[] | select(.user.login == "claude[bot]") | .id' 2>/dev/null | while read CID; do
+            gh api -X DELETE "repos/${{ github.repository }}/issues/comments/$CID" 2>/dev/null || true
+          done
+
+          # Find the latest agent branch for this issue
+          # Remove trailing slash from prefix for branch search
+          SEARCH_PREFIX="${BRANCH_PREFIX%/}"
+          BRANCH=$(gh api --paginate "repos/${{ github.repository }}/branches" \
+            --jq "[.[] | select(.name | startswith(\"${SEARCH_PREFIX}/issue-${ISSUE_NUM}-\") or startswith(\"${SEARCH_PREFIX}/${ISSUE_NUM}-\")) | .name] | sort | last // empty")
+
+          if [ -z "$BRANCH" ]; then
+            python3 /tmp/_metron_scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "$AGENT_LABEL" "" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 0
+          fi
+
+          # Create or find PR
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // ""')
+          if [ -n "$EXISTING_PR" ]; then
+            PR_NUM=$EXISTING_PR
+          else
+            TITLE=$(gh issue view "$ISSUE_NUM" --json title --jq .title)
+            gh pr create \
+              --title "$TITLE" \
+              --body "Implements #${ISSUE_NUM}
+
+          Generated by automated agent." \
+              --draft \
+              --label "$AGENT_LABEL" \
+              --head "$BRANCH" || true
+            PR_NUM=$(gh pr view "$BRANCH" --json number --jq '.number' 2>/dev/null || echo "")
+          fi
+
+          python3 /tmp/_metron_scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "$AGENT_LABEL" "$PR_NUM" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

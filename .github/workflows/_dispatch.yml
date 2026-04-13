@@ -1,0 +1,176 @@
+name: "Metron: Dispatch + Cleanup"
+
+# Reusable workflow — called by target repos on issues.labeled / issues.closed.
+# Posts a status table, dispatches non-Claude agents, and cleans up on close.
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: "Path to metron.toml in the calling repo"
+        required: false
+        type: string
+        default: "metron.toml"
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+  pull-requests: write
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Router: on issues.labeled with the configured ready_label
+  # -----------------------------------------------------------------------
+  router:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'labeled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse config
+        id: config
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          # Read the ready_label from config
+          READY_LABEL=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config
+          cfg = load_config('${{ inputs.config-path }}')
+          print(cfg.get('metron', {}).get('ready_label', 'ready-for-dev'))
+          ")
+          echo "ready_label=$READY_LABEL" >> "$GITHUB_OUTPUT"
+
+          # Check if the applied label matches the ready_label
+          if [ "${{ github.event.label.name }}" != "$READY_LABEL" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post status table
+        if: steps.config.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+
+          STATUS=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents
+          cfg = load_config('${{ inputs.config-path }}')
+          agents = get_agents(cfg)
+          for a in agents:
+              print(f'| {a[\"name\"]} | ⏳ Running... |  |  |  |')
+          ")
+
+          gh issue comment "$ISSUE_NUM" --body "## Agent Implementations
+
+          | Agent | Status | PR | Preview | Run |
+          |-------|--------|-----|---------|-----|
+          ${STATUS}
+
+          ---
+          *Agents are working on this issue. This comment will be updated as each completes.*"
+
+      - name: Dispatch agents
+        if: steps.config.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+
+          # Get list of non-Claude harnesses to dispatch via workflow_dispatch.
+          # Claude is triggered by the issues.labeled event directly (handled by
+          # the caller workflow routing to _agent-claude.yml).
+          python3 -c "
+          import sys, json
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents
+          cfg = load_config('${{ inputs.config-path }}')
+          agents = get_agents(cfg)
+          seen = set()
+          for a in agents:
+              h = a['harness']
+              if h != 'claude' and h not in seen:
+                  seen.add(h)
+                  # Each agent entry gets its own dispatch with harness identifier
+                  print(json.dumps({'harness': h, 'label': a['label']}))
+          " | while read -r AGENT_JSON; do
+            HARNESS=$(echo "$AGENT_JSON" | jq -r '.harness')
+            LABEL=$(echo "$AGENT_JSON" | jq -r '.label')
+
+            echo "Dispatching metron-agents.yml for $HARNESS (issue #$ISSUE_NUM)..."
+            gh workflow run "metron-agents.yml" \
+              -f issue_number="$ISSUE_NUM" \
+              -f agent="$HARNESS" || echo "Warning: failed to dispatch $HARNESS"
+          done
+
+  # -----------------------------------------------------------------------
+  # Cleanup: on issues.closed — close all agent PRs for the issue
+  # -----------------------------------------------------------------------
+  cleanup:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Close all agent PRs for this issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+
+          # Load all branch prefixes from config
+          PREFIXES=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents
+          cfg = load_config('${{ inputs.config-path }}')
+          for a in get_agents(cfg):
+              print(a['branch_prefix'])
+          ")
+
+          # Find and close any open agent PRs for this issue
+          gh pr list --json number,body,headRefName,state \
+            --jq ".[] | select(.body | test(\"Implements #${ISSUE_NUM}\\\\b\")) | {number, branch: .headRefName}" 2>/dev/null | jq -r '.number, .branch' | while read PR_NUM && read BRANCH; do
+            # Check if branch matches any agent prefix
+            IS_AGENT=false
+            for PREFIX in $PREFIXES; do
+              if echo "$BRANCH" | grep -qi "^${PREFIX}"; then
+                IS_AGENT=true
+                break
+              fi
+            done
+
+            if [ "$IS_AGENT" = "true" ]; then
+              echo "Closing agent PR #$PR_NUM ($BRANCH)"
+              gh pr close "$PR_NUM" --comment "Closed: issue #${ISSUE_NUM} was closed." --delete-branch || true
+            fi
+          done

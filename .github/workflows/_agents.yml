@@ -1,0 +1,418 @@
+name: "Metron: Agent Runners (Codex + OpenHands)"
+
+# Reusable workflow — called by target repos via workflow_dispatch.
+# Receives issue_number and agent harness, runs the appropriate agent.
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: "Path to metron.toml in the calling repo"
+        required: false
+        type: string
+        default: "metron.toml"
+      issue_number:
+        description: "Issue number to implement"
+        required: true
+        type: string
+      agent:
+        description: "Agent harness to run (codex, openhands)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Codex agent
+  # -----------------------------------------------------------------------
+  codex:
+    if: inputs.agent == 'codex'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: agent-codex-${{ inputs.issue_number }}
+      cancel-in-progress: false
+    env:
+      ISSUE_NUM: ${{ inputs.issue_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse config
+        id: config
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents, get_build_commands
+
+          cfg = load_config('${{ inputs.config-path }}')
+          build = get_build_commands(cfg)
+          agents = get_agents(cfg)
+
+          # Find first codex agent
+          codex_agent = None
+          for a in agents:
+              if a['harness'] == 'codex':
+                  codex_agent = a
+                  break
+
+          if not codex_agent:
+              print('::error::No Codex agent found in config')
+              import sys; sys.exit(1)
+
+          guidance = cfg.get('metron', {}).get('guidance_file', 'AGENTS.md')
+
+          with open('$GITHUB_OUTPUT', 'a') as f:
+              f.write(f'runtime={build[\"runtime\"]}\n')
+              f.write(f'install={build[\"install\"]}\n')
+              f.write(f'branch_prefix={codex_agent[\"branch_prefix\"]}\n')
+              f.write(f'agent_label={codex_agent[\"label\"]}\n')
+              f.write(f'guidance_file={guidance}\n')
+          "
+
+      # Runtime setup
+      - uses: actions/setup-node@v4
+        if: steps.config.outputs.runtime == 'node'
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - uses: actions/setup-python@v5
+        if: steps.config.outputs.runtime == 'python'
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.config.outputs.install != ''
+        run: ${{ steps.config.outputs.install }}
+
+      - name: Close previous PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 .metron/scripts/agent_ops.py close-previous-prs \
+            "$ISSUE_NUM" \
+            "${{ steps.config.outputs.branch_prefix }}" \
+            "${{ steps.config.outputs.agent_label }}"
+
+      - name: Build prompt
+        id: prompt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE=$(gh issue view "$ISSUE_NUM" --json title --jq .title)
+          BODY=$(gh issue view "$ISSUE_NUM" --json body --jq .body)
+
+          GUIDANCE_FILE="${{ steps.config.outputs.guidance_file }}"
+          AGENTS_MD=$(cat "$GUIDANCE_FILE" 2>/dev/null || echo "")
+
+          PROMPT_DELIM="PROMPT_$(uuidgen | tr -d '-')"
+          echo "prompt<<${PROMPT_DELIM}" >> "$GITHUB_OUTPUT"
+          echo "Implement GitHub Issue #${ISSUE_NUM}: ${TITLE}" >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo "## Issue Description" >> "$GITHUB_OUTPUT"
+          echo "${BODY}" >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo "## Development Guide" >> "$GITHUB_OUTPUT"
+          echo "${AGENTS_MD}" >> "$GITHUB_OUTPUT"
+          echo "${PROMPT_DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex (attempt 1)
+        id: codex1
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Wait before retry
+        if: steps.codex1.outcome == 'failure'
+        run: echo "First attempt failed, waiting 60s..." && sleep 60
+
+      - name: Run Codex (attempt 2)
+        if: steps.codex1.outcome == 'failure'
+        id: codex2
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Agent diagnostics
+        if: always()
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: python3 .metron/scripts/agent_ops.py diagnostics "${{ steps.config.outputs.agent_label }}"
+
+      - name: Create branch, PR, and post result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          # Preserve metron scripts outside the working tree so they survive git ops
+          cp -r .metron/scripts /tmp/_metron_scripts
+
+          # Remove .metron from working tree before checking porcelain
+          rm -rf .metron
+
+          if [ -z "$(git status --porcelain)" ]; then
+            python3 /tmp/_metron_scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "${{ steps.config.outputs.agent_label }}" "" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" 2>/dev/null || true
+            exit 0
+          fi
+
+          TITLE=$(gh issue view "$ISSUE_NUM" --json title --jq .title)
+          SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 40)
+          BRANCH_PREFIX="${{ steps.config.outputs.branch_prefix }}"
+          # Remove trailing slash
+          PREFIX="${BRANCH_PREFIX%/}"
+          BRANCH="${PREFIX}/${ISSUE_NUM}-${SLUG}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ -n "$PAT_TOKEN" ]; then
+            git config --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+            git remote set-url origin "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git"
+          fi
+
+          # Ensure workflow files match latest main
+          git fetch origin main --quiet
+          git checkout origin/main -- .github/workflows/ 2>/dev/null || true
+
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "feat: implement issue #${ISSUE_NUM} via agent"
+          git push origin "$BRANCH" --force
+
+          AGENT_LABEL="${{ steps.config.outputs.agent_label }}"
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Implements #${ISSUE_NUM}
+
+          Generated by automated agent." \
+            --draft \
+            --label "$AGENT_LABEL" \
+            --head "$BRANCH" || true
+
+          PR_NUM=$(gh pr view "$BRANCH" --json number --jq '.number' 2>/dev/null || echo "")
+
+          python3 /tmp/_metron_scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "$AGENT_LABEL" "$PR_NUM" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" 2>/dev/null || true
+
+  # -----------------------------------------------------------------------
+  # OpenHands agent
+  # -----------------------------------------------------------------------
+  openhands:
+    if: inputs.agent == 'openhands'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: agent-openhands-${{ inputs.issue_number }}
+      cancel-in-progress: false
+    env:
+      ISSUE_NUM: ${{ inputs.issue_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse config
+        id: config
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents
+
+          cfg = load_config('${{ inputs.config-path }}')
+          agents = get_agents(cfg)
+
+          # Find first openhands agent
+          oh_agent = None
+          for a in agents:
+              if a['harness'] == 'openhands':
+                  oh_agent = a
+                  break
+
+          if not oh_agent:
+              print('::error::No OpenHands agent found in config')
+              import sys; sys.exit(1)
+
+          with open('$GITHUB_OUTPUT', 'a') as f:
+              f.write(f'model_id={oh_agent[\"model_id\"]}\n')
+              f.write(f'branch_prefix={oh_agent[\"branch_prefix\"]}\n')
+              f.write(f'agent_label={oh_agent[\"label\"]}\n')
+          "
+
+      - name: Close previous PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 .metron/scripts/agent_ops.py close-previous-prs \
+            "$ISSUE_NUM" \
+            "${{ steps.config.outputs.branch_prefix }}" \
+            "${{ steps.config.outputs.agent_label }}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install OpenHands
+        run: pip install openhands-ai 2>&1 | tail -3
+
+      - name: Resolve issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LLM_MODEL: ${{ steps.config.outputs.model_id }}
+        run: |
+          echo "LLM_MODEL=$LLM_MODEL"
+          python -m openhands.resolver.resolve_issue \
+            --selected-repo "${{ github.repository }}" \
+            --issue-number "$ISSUE_NUM" \
+            --token "$GITHUB_TOKEN" \
+            --username "github-actions[bot]" \
+            --llm-model "$LLM_MODEL" \
+            --llm-api-key "$LLM_API_KEY" \
+            --max-iterations 30 \
+            --output-dir /tmp/oh-output \
+            --runtime docker \
+            2>&1 | tee /tmp/oh-resolve.log || true
+
+      - name: Agent diagnostics
+        if: always()
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: python3 .metron/scripts/agent_ops.py diagnostics "${{ steps.config.outputs.agent_label }}"
+
+      - name: Apply patch and create branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          if [ ! -f /tmp/oh-output/output.jsonl ]; then
+            echo "No resolver output found"
+            python3 .metron/scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "${{ steps.config.outputs.agent_label }}" "" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 0
+          fi
+
+          PATCH=$(python3 -c "
+          import json
+          with open('/tmp/oh-output/output.jsonl') as f:
+              for line in f:
+                  data = json.loads(line)
+                  if data.get('git_patch'):
+                      print(data['git_patch'])
+                      break
+          " 2>/dev/null || echo "")
+
+          if [ -z "$PATCH" ]; then
+            echo "No patch in resolver output"
+            python3 .metron/scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "${{ steps.config.outputs.agent_label }}" "" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 0
+          fi
+
+          echo "Patch found ($(echo "$PATCH" | wc -l) lines)"
+
+          # Dry-run check for diagnostics
+          if ! echo "$PATCH" | git apply --check 2>/dev/null; then
+            echo "::warning::Patch dry-run failed -- attempting apply anyway"
+            echo "--- Patch preview (first 30 lines) ---"
+            echo "$PATCH" | head -30
+            echo "--- End preview ---"
+          fi
+
+          # Try increasingly lenient patch application methods
+          if echo "$PATCH" | git apply --allow-empty 2>/dev/null; then
+            echo "Patch applied cleanly"
+          elif echo "$PATCH" | git apply --3way 2>/dev/null; then
+            echo "Patch applied with 3-way merge"
+          elif echo "$PATCH" | git apply --reject 2>/dev/null; then
+            echo "::warning::Patch applied with rejections -- some hunks may be missing"
+            find . -name "*.rej" -exec echo "Rejected: {}" \; -exec rm {} \;
+          elif echo "$PATCH" | patch -p1 --no-backup-if-mismatch --force 2>/dev/null; then
+            echo "::warning::Patch applied via patch command (lenient mode)"
+          else
+            echo "::error::All patch methods failed"
+            python3 .metron/scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "${{ steps.config.outputs.agent_label }}" "" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 0
+          fi
+
+          # Preserve metron scripts outside the working tree
+          cp -r .metron/scripts /tmp/_metron_scripts
+
+          # Remove .metron checkout before checking for changes
+          rm -rf .metron
+
+          if [ -z "$(git status --porcelain)" ]; then
+            python3 /tmp/_metron_scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "${{ steps.config.outputs.agent_label }}" "" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" 2>/dev/null || true
+            exit 0
+          fi
+
+          TITLE=$(gh issue view "$ISSUE_NUM" --json title --jq .title 2>/dev/null || echo "fix")
+          SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 40)
+          BRANCH_PREFIX="${{ steps.config.outputs.branch_prefix }}"
+          PREFIX="${BRANCH_PREFIX%/}"
+          BRANCH="${PREFIX}/${ISSUE_NUM}-${SLUG}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ -n "$PAT_TOKEN" ]; then
+            git config --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+            git remote set-url origin "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git"
+          fi
+
+          # Ensure workflow files match latest main
+          git fetch origin main --quiet
+          git checkout origin/main -- .github/workflows/ 2>/dev/null || true
+
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "feat: implement issue #${ISSUE_NUM} via agent"
+          git push origin "$BRANCH" --force
+
+          AGENT_LABEL="${{ steps.config.outputs.agent_label }}"
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            PR_NUM="$EXISTING_PR"
+            gh pr edit "$PR_NUM" --add-label "$AGENT_LABEL" || true
+          else
+            gh pr create \
+              --title "$TITLE" \
+              --body "Implements #${ISSUE_NUM}
+
+          Generated by automated agent." \
+              --draft \
+              --label "$AGENT_LABEL" \
+              --head "$BRANCH" || true
+
+            PR_NUM=$(gh pr view "$BRANCH" --json number --jq '.number' 2>/dev/null || echo "")
+
+            python3 /tmp/_metron_scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "$AGENT_LABEL" "$PR_NUM" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" 2>/dev/null || true
+          fi

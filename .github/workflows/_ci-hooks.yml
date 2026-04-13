@@ -1,0 +1,312 @@
+name: "Metron: CI Hooks (Self-Heal + Preview + Deploy)"
+
+# Reusable workflow — called by target repos on workflow_run + deployment_status.
+# Handles CI failure repair, auto-merge, deploy failure repair, and preview link posting.
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: "Path to metron.toml in the calling repo"
+        required: false
+        type: string
+        default: "metron.toml"
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # -----------------------------------------------------------------------
+  # CI failure — dispatch repair to the agent that owns the PR
+  # -----------------------------------------------------------------------
+  ci-failure:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dispatch repair for CI failure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          RUN_ID="${{ github.event.workflow_run.id }}"
+
+          PR_NUM=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+          if [ -z "$PR_NUM" ]; then
+            echo "No PR for branch $BRANCH"
+            exit 0
+          fi
+
+          # Collect errors from ALL CI steps
+          FAILURE_LOG=$(gh run view "$RUN_ID" --log 2>&1 | grep -E "##\[error\]|error TS|Error:|error " | grep -v "##\[error\]Process completed" | head -30 || echo "Could not fetch log")
+
+          # Also note which steps passed/failed
+          STEP_SUMMARY=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[].steps[] | select(.conclusion != "skipped") | "\(.name): \(.conclusion)"' 2>/dev/null || echo "")
+
+          python3 .metron/scripts/agent_ops.py dispatch-repair "$PR_NUM" "CI failed. Fix ALL errors before pushing -- CI has multiple steps (lint, typecheck, build) and all must pass.
+
+          Step results:
+          \`\`\`
+          ${STEP_SUMMARY}
+          \`\`\`
+
+          Errors found:
+          \`\`\`
+          ${FAILURE_LOG}
+          \`\`\`"
+
+  # -----------------------------------------------------------------------
+  # Auto-merge — when CI passes on merge-pending PRs
+  # -----------------------------------------------------------------------
+  auto-merge:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge pending PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+
+          PR_NUM=$(gh pr list --head "$BRANCH" --json number,labels \
+            --jq '.[0] | select(.labels | map(.name) | index("merge-pending")) | .number // empty' 2>/dev/null || echo "")
+
+          if [ -z "$PR_NUM" ]; then
+            echo "No merge-pending PR on branch $BRANCH"
+            exit 0
+          fi
+
+          echo "Merging PR #$PR_NUM..."
+
+          PR_BODY=$(gh pr view "$PR_NUM" --json body --jq '.body' 2>/dev/null || echo "")
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -oP 'Implements #\K\d+' || echo "")
+          AGENT_NAME=$(python3 .metron/scripts/agent_ops.py lookup branch-to-name "$BRANCH" name 2>/dev/null || echo "Agent")
+
+          gh pr edit "$PR_NUM" --remove-label "merge-pending" || true
+          gh pr ready "$PR_NUM" || true
+          sleep 5
+
+          if gh pr merge "$PR_NUM" --squash --delete-branch; then
+            if [ -n "$ISSUE_NUM" ]; then
+              python3 .metron/scripts/agent_ops.py close-losing-prs "$ISSUE_NUM" "$PR_NUM" "$AGENT_NAME"
+              gh issue close "$ISSUE_NUM" --comment "Merged ${AGENT_NAME} implementation (PR #${PR_NUM})."
+            fi
+          else
+            gh pr edit "$PR_NUM" --add-label "merge-pending" || true
+          fi
+
+  # -----------------------------------------------------------------------
+  # Deploy failure — dispatch repair for Vercel/deploy failures
+  # -----------------------------------------------------------------------
+  deploy-failure:
+    if: >-
+      github.event_name == 'deployment_status' &&
+      github.event.deployment_status.state == 'failure' &&
+      github.event.deployment_status.environment == 'Preview'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dispatch repair for deploy failure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          DEPLOY_SHA="${{ github.event.deployment.sha }}"
+
+          # Find the PR for this deployment
+          PR_NUM=$(gh api "repos/${{ github.repository }}/pulls" \
+            --jq "[.[] | select(.head.sha == \"${DEPLOY_SHA}\")] | .[0].number // empty" 2>/dev/null || echo "")
+
+          if [ -z "$PR_NUM" ]; then
+            echo "No open PR found for SHA $DEPLOY_SHA"
+            exit 0
+          fi
+
+          BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
+
+          # Check if this is an agent branch
+          AGENT_INFO=$(python3 .metron/scripts/agent_ops.py lookup branch-to-name "$BRANCH" 2>/dev/null || echo "")
+          if [ -z "$AGENT_INFO" ]; then
+            echo "Not an agent branch: $BRANCH"
+            exit 0
+          fi
+
+          # Read deploy platform from config
+          DEPLOY_PLATFORM=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_deploy_platform
+          cfg = load_config('${{ inputs.config-path }}')
+          print(get_deploy_platform(cfg))
+          ")
+
+          # Fetch deploy logs (Vercel-specific)
+          LOG_URL="${{ github.event.deployment_status.log_url }}"
+          TARGET_URL="${{ github.event.deployment_status.target_url }}"
+          DEPLOY_LOGS=""
+
+          if [ "$DEPLOY_PLATFORM" = "vercel" ] && [ -n "$VERCEL_TOKEN" ]; then
+            DEPLOY_HOST="${{ github.event.deployment_status.environment_url }}"
+            DEPLOY_HOST="${DEPLOY_HOST#https://}"
+            if [ -n "$DEPLOY_HOST" ]; then
+              DPL_UID=$(curl -sf "https://api.vercel.com/v13/deployments/get?url=${DEPLOY_HOST}" \
+                -H "Authorization: Bearer $VERCEL_TOKEN" \
+                | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+              if [ -n "$DPL_UID" ]; then
+                echo "Fetching logs for deployment $DPL_UID..."
+                DEPLOY_LOGS=$(npx --yes vercel inspect "$DPL_UID" --logs --token="$VERCEL_TOKEN" 2>&1 | tail -50 || echo "")
+              fi
+            fi
+          fi
+
+          if [ -z "$DEPLOY_LOGS" ]; then
+            DEPLOY_LOGS="Deployment failed. Logs: ${LOG_URL:-$TARGET_URL}"
+          fi
+
+          python3 .metron/scripts/agent_ops.py dispatch-repair "$PR_NUM" "Deployment failed (CI passed but deploy did not). This is often caused by missing environment variables, client generation issues, or runtime errors during prerendering.
+
+          Deploy build logs:
+          \`\`\`
+          ${DEPLOY_LOGS}
+          \`\`\`"
+
+  # -----------------------------------------------------------------------
+  # Post preview link + summary on successful deploy
+  # -----------------------------------------------------------------------
+  post-preview:
+    if: >-
+      github.event_name == 'deployment_status' &&
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment_status.environment == 'Preview'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find PR and post preview + summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PORTKEY_API_KEY: ${{ secrets.PORTKEY_API_KEY }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          PREVIEW_URL="${{ github.event.deployment_status.environment_url }}"
+          DEPLOY_SHA="${{ github.event.deployment.sha }}"
+
+          # Find the PR for this deployment SHA
+          PR_DATA=$(gh api "repos/${{ github.repository }}/pulls" \
+            --jq "[.[] | select(.head.sha == \"${DEPLOY_SHA}\")] | .[0]" 2>/dev/null || echo "")
+
+          if [ -z "$PR_DATA" ] || [ "$PR_DATA" = "null" ]; then
+            echo "No open PR found for SHA $DEPLOY_SHA"
+            exit 0
+          fi
+
+          PR_NUM=$(echo "$PR_DATA" | jq -r '.number')
+          PR_BODY=$(echo "$PR_DATA" | jq -r '.body')
+          BRANCH=$(echo "$PR_DATA" | jq -r '.head.ref')
+
+          # Look up agent from branch prefix
+          AGENT_INFO=$(python3 .metron/scripts/agent_ops.py lookup branch-to-name "$BRANCH" 2>/dev/null || echo "")
+          if [ -z "$AGENT_INFO" ]; then
+            echo "Not an agent branch: $BRANCH"
+            exit 0
+          fi
+
+          AGENT=$(echo "$AGENT_INFO" | grep "^name=" | cut -d= -f2)
+          echo "Branch $BRANCH -> $AGENT (PR #$PR_NUM)"
+
+          # Extract issue number from PR body
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -oP 'Implements #\K\d+' || echo "")
+          if [ -z "$ISSUE_NUM" ]; then
+            echo "No linked issue found"
+            exit 0
+          fi
+
+          # Generate summary
+          echo "Generating summary for PR #$PR_NUM..."
+          SUMMARY=$(python3 .metron/scripts/agent_ops.py summarize-pr "$PR_NUM" "$ISSUE_NUM" 2>&1) || true
+          if [ -n "$SUMMARY" ]; then
+            echo "Summary generated (${#SUMMARY} chars)"
+          else
+            echo "Warning: summary generation returned empty"
+          fi
+
+          # Build comment
+          BODY="## ${AGENT} Implementation
+          - **PR**: #${PR_NUM}
+          - **Preview**: ${PREVIEW_URL}"
+
+          if [ -n "$SUMMARY" ]; then
+            BODY="${BODY}
+
+          ${SUMMARY}"
+          fi
+
+          BODY="${BODY}
+
+          ---
+          *Review and compare agent implementations, then merge the best one.*"
+
+          # Find and update existing comment, or post new one
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUM}/comments" \
+            --jq "[.[] | select(.body | startswith(\"## ${AGENT}\")) | select(.body | contains(\"#${PR_NUM}\"))] | last | .id // empty" 2>/dev/null || echo "")
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -f body="$BODY"
+          else
+            gh issue comment "$ISSUE_NUM" --body "$BODY"
+          fi
+
+          # Also update the status table with the preview link
+          AGENT_LABEL=$(echo "$AGENT_INFO" | grep "^label=" | cut -d= -f2)
+          python3 .metron/scripts/agent_ops.py update-status "$ISSUE_NUM" "$AGENT_LABEL" "preview" "$PR_NUM" "$PREVIEW_URL" || true

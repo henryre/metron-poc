@@ -1,0 +1,518 @@
+name: "Metron: Comment Commands"
+
+# Reusable workflow — called by target repos on issue_comment + pull_request_review_comment.
+# Routes /merge, /feedback, and @agent repair mentions.
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: "Path to metron.toml in the calling repo"
+        required: false
+        type: string
+        default: "metron.toml"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  # -----------------------------------------------------------------------
+  # /merge command — merge a selected agent's PR
+  # -----------------------------------------------------------------------
+  merge:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      startsWith(github.event.comment.body, '/merge')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: merge-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Acknowledge command
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content='+1' 2>/dev/null || true
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PORTKEY_API_KEY: ${{ secrets.PORTKEY_API_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          # Parse agent letter
+          AGENT_LETTER=$(python3 -c "
+          import re, os
+          comment = os.environ['COMMENT_BODY']
+          m = re.search(r'/merge\s+(?:agent\s+)?([A-Za-z])', comment)
+          print(m.group(1).upper() if m else '')
+          ")
+
+          if [ -z "$AGENT_LETTER" ]; then
+            gh issue comment "$ISSUE_NUM" --body "Could not parse agent. Use: \`/merge agent A\`"
+            exit 0
+          fi
+
+          AGENT_INFO=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" 2>/dev/null || echo "")
+          if [ -z "$AGENT_INFO" ]; then
+            gh issue comment "$ISSUE_NUM" --body "Unknown agent '$AGENT_LETTER'."
+            exit 0
+          fi
+
+          AGENT_LABEL=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" label 2>/dev/null || echo "")
+          AGENT_NAME=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" name 2>/dev/null || echo "Agent")
+          BRANCH_PREFIX=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" branch_prefix 2>/dev/null || echo "")
+
+          # Find the agent's PR
+          WINNER_PR=$(gh pr list --json number,body,headRefName,labels \
+            --jq "[.[] | select(
+              (.body | test(\"Implements #${ISSUE_NUM}\\\\b\")) and
+              ((.headRefName | startswith(\"${BRANCH_PREFIX}\")) or (.labels | map(.name) | index(\"${AGENT_LABEL}\")))
+            )] | last | .number // empty" 2>/dev/null || echo "")
+
+          if [ -z "$WINNER_PR" ]; then
+            gh issue comment "$ISSUE_NUM" --body "No ${AGENT_NAME} PR found for this issue."
+            exit 0
+          fi
+
+          echo "Winner: ${AGENT_NAME} PR #${WINNER_PR}"
+
+          # Check CI status
+          CI_STATUS=$(gh pr checks "$WINNER_PR" 2>&1 | awk '
+            BEGIN { pass=0; fail=0; pending=0; total=0 }
+            /\tpass\t/  { pass++; total++ }
+            /\tfail\t/  { fail++; total++ }
+            /\tpending\t/ { pending++; total++ }
+            END {
+              if (total == 0) print "no-checks"
+              else if (fail > 0) print "fail"
+              else if (pending > 0) print "pending"
+              else print "pass"
+            }
+          ')
+
+          echo "CI status: $CI_STATUS"
+
+          if [ "$CI_STATUS" = "pass" ] || [ "$CI_STATUS" = "no-checks" ]; then
+            # Merge now
+            gh pr ready "$WINNER_PR" || true
+            sleep 5
+            if gh pr merge "$WINNER_PR" --squash --delete-branch; then
+              python3 .metron/scripts/agent_ops.py close-losing-prs "$ISSUE_NUM" "$WINNER_PR" "$AGENT_NAME"
+              gh issue close "$ISSUE_NUM" --comment "Merged ${AGENT_NAME} implementation (PR #${WINNER_PR})."
+            else
+              gh issue comment "$ISSUE_NUM" --body "Failed to merge PR #${WINNER_PR}. Check for merge conflicts."
+            fi
+
+          else
+            # CI pending or failing -- mark for auto-merge when CI passes
+            gh pr edit "$WINNER_PR" --add-label "merge-pending" || true
+            if [ "$CI_STATUS" = "fail" ]; then
+              gh issue comment "$ISSUE_NUM" --body "CI is failing on ${AGENT_NAME} PR #${WINNER_PR}. Agent will auto-repair. Will merge when CI passes."
+            else
+              gh issue comment "$ISSUE_NUM" --body "CI is still running on ${AGENT_NAME} PR #${WINNER_PR}. Will merge automatically when checks pass."
+            fi
+          fi
+
+  # -----------------------------------------------------------------------
+  # /feedback command — parse feedback and post to agent's PR
+  # -----------------------------------------------------------------------
+  feedback:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      startsWith(github.event.comment.body, '/feedback')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: agent-feedback-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Acknowledge command
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content='+1' 2>/dev/null || true
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse and post feedback to agent's PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PORTKEY_API_KEY: ${{ secrets.PORTKEY_API_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          # Read LLM config for summary model
+          SUMMARY_MODEL=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config
+          cfg = load_config('${{ inputs.config-path }}')
+          print(cfg.get('llm', {}).get('summary_model', '@bedrock/global.anthropic.claude-sonnet-4-6'))
+          ")
+
+          # Parse agent letter and feedback with LLM
+          PARSE_RESULT=$(python3 -c "
+          import json, os, urllib.request
+
+          comment = os.environ['COMMENT_BODY']
+          api_key = os.environ['PORTKEY_API_KEY']
+
+          body = json.dumps({
+              'model': '$SUMMARY_MODEL',
+              'max_tokens': 200,
+              'messages': [{'role': 'user', 'content': f'''Parse this feedback command. Extract which agent letter and the feedback.
+          Command: {comment}
+
+          Respond in JSON only: {{\"agent\": \"A\" or \"B\" or \"C\" or \"D\", \"feedback\": \"the feedback text\"}}
+          If unclear, default agent to \"A\".'''}],
+          })
+
+          req = urllib.request.Request(
+              'https://api.portkey.ai/v1/messages',
+              data=body.encode(),
+              headers={
+                  'Content-Type': 'application/json',
+                  'x-portkey-api-key': api_key,
+              },
+          )
+
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              data = json.loads(resp.read())
+              content = data['content'][0]['text']
+              import re
+              match = re.search(r'\{.*\}', content, re.DOTALL)
+              if match:
+                  print(match.group(0))
+              else:
+                  print(json.dumps({'agent': 'A', 'feedback': comment.replace('/feedback', '').strip()}))
+          ")
+
+          AGENT_LETTER=$(echo "$PARSE_RESULT" | jq -r '.agent')
+          FEEDBACK=$(echo "$PARSE_RESULT" | jq -r '.feedback')
+
+          # Look up agent config
+          AGENT_INFO=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" 2>/dev/null || echo "")
+          if [ -z "$AGENT_INFO" ]; then
+            gh issue comment "$ISSUE_NUM" --body "Could not identify agent '$AGENT_LETTER'. Use A, B, or C."
+            exit 0
+          fi
+
+          AGENT_LABEL=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" label 2>/dev/null || echo "")
+          AGENT_NAME=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" name 2>/dev/null || echo "Agent")
+          BRANCH_PREFIX=$(python3 .metron/scripts/agent_ops.py lookup name-to-label "$AGENT_LETTER" branch_prefix 2>/dev/null || echo "")
+
+          # Find the agent's PR
+          PR_NUM=$(gh pr list --json number,body,headRefName,labels \
+            --jq "[.[] | select(
+              (.body | test(\"Implements #${ISSUE_NUM}\\\\b\")) and
+              ((.headRefName | startswith(\"${BRANCH_PREFIX}\")) or (.labels | map(.name) | index(\"${AGENT_LABEL}\")))
+            )] | last | .number // empty" 2>/dev/null || echo "")
+
+          if [ -z "$PR_NUM" ]; then
+            gh issue comment "$ISSUE_NUM" --body "No ${AGENT_NAME} PR found for this issue."
+            exit 0
+          fi
+
+          # Get @mention from config
+          MENTION=$(python3 .metron/scripts/agent_ops.py lookup label-to-name "$AGENT_LABEL" mention 2>/dev/null || echo "")
+
+          # Post feedback on the agent's PR using PAT so the event triggers other workflows
+          if [ -n "$PAT_TOKEN" ]; then
+            GH_TOKEN="$PAT_TOKEN" gh pr comment "$PR_NUM" --body "${MENTION} ${FEEDBACK}"
+          else
+            gh pr comment "$PR_NUM" --body "${MENTION} ${FEEDBACK}"
+            echo "::warning::PAT_TOKEN not set -- feedback posted but agent may not pick it up automatically"
+          fi
+
+          gh issue comment "$ISSUE_NUM" --body "Feedback sent to ${AGENT_NAME} (PR #${PR_NUM})."
+
+  # -----------------------------------------------------------------------
+  # Codex repair — @codex mention on PR comments
+  # -----------------------------------------------------------------------
+  codex-repair:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@codex') &&
+      github.event.comment.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: codex-repair-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Get PR branch
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ github.event.issue.number }}"
+          BRANCH=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
+          echo "PR: $PR_NUM, Branch: $BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.branch != ''
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.branch != ''
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse config
+        if: steps.pr.outputs.branch != ''
+        id: config
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_build_commands
+          cfg = load_config('${{ inputs.config-path }}')
+          build = get_build_commands(cfg)
+          with open('$GITHUB_OUTPUT', 'a') as f:
+              f.write(f'runtime={build[\"runtime\"]}\n')
+              f.write(f'install={build[\"install\"]}\n')
+          "
+
+      - uses: actions/setup-node@v4
+        if: steps.pr.outputs.branch != '' && steps.config.outputs.runtime == 'node'
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - uses: actions/setup-python@v5
+        if: steps.pr.outputs.branch != '' && steps.config.outputs.runtime == 'python'
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.pr.outputs.branch != '' && steps.config.outputs.install != ''
+        run: ${{ steps.config.outputs.install }}
+
+      - name: Build repair prompt
+        if: steps.pr.outputs.branch != ''
+        id: prompt
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          INSTRUCTION=$(echo "$COMMENT_BODY" | sed 's/@codex[[:space:]]*//')
+          AGENTS_MD=""
+          # Try to read guidance file from config, fallback to AGENTS.md
+          GUIDANCE=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config
+          cfg = load_config('${{ inputs.config-path }}')
+          print(cfg.get('metron', {}).get('guidance_file', 'AGENTS.md'))
+          " 2>/dev/null || echo "AGENTS.md")
+          AGENTS_MD=$(cat "$GUIDANCE" 2>/dev/null || echo "")
+
+          PROMPT_DELIM="PROMPT_$(uuidgen | tr -d '-')"
+          echo "prompt<<${PROMPT_DELIM}" >> "$GITHUB_OUTPUT"
+          echo "$INSTRUCTION" >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo "## Development Guide" >> "$GITHUB_OUTPUT"
+          echo "${AGENTS_MD}" >> "$GITHUB_OUTPUT"
+          echo "${PROMPT_DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex
+        if: steps.pr.outputs.branch != ''
+        uses: openai/codex-action@v1
+        with:
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Commit and push
+        if: steps.pr.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          # Ensure workflow files match latest main
+          git fetch origin main --quiet
+          git checkout origin/main -- .github/workflows/ 2>/dev/null || true
+          # Remove .metron checkout from working tree
+          rm -rf .metron
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+            git add -A
+            git commit -m "fix: apply repair from PR comment"
+            git push
+          fi
+
+  # -----------------------------------------------------------------------
+  # OpenHands repair — @openhands-agent mention on PR/issue comments
+  # -----------------------------------------------------------------------
+  openhands-repair:
+    if: >-
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@openhands-agent')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@openhands-agent'))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: openhands-repair-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: henryre/metron-poc
+          path: .metron
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve issue number
+        id: issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ github.event.issue.number }}"
+          ISSUE_NUM=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json body --jq '.body' 2>/dev/null | grep -oP 'Implements #\K\d+' || echo "$PR_NUM")
+          echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install OpenHands
+        run: pip install openhands-ai 2>&1 | tail -3
+
+      - name: Parse config for LLM settings
+        id: config
+        env:
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents
+          cfg = load_config('${{ inputs.config-path }}')
+          agents = get_agents(cfg)
+          # Find first openhands agent
+          for a in agents:
+              if a['harness'] == 'openhands':
+                  with open('$GITHUB_OUTPUT', 'a') as f:
+                      f.write(f'model_id={a[\"model_id\"]}\n')
+                      f.write(f'branch_prefix={a[\"branch_prefix\"]}\n')
+                      f.write(f'agent_label={a[\"label\"]}\n')
+                  break
+          "
+
+      - name: Resolve issue
+        env:
+          ISSUE_NUM: ${{ steps.issue.outputs.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LLM_MODEL: ${{ steps.config.outputs.model_id }}
+        run: |
+          echo "LLM_MODEL=$LLM_MODEL"
+          python -m openhands.resolver.resolve_issue \
+            --selected-repo "${{ github.repository }}" \
+            --issue-number "$ISSUE_NUM" \
+            --token "$GITHUB_TOKEN" \
+            --username "github-actions[bot]" \
+            --llm-model "$LLM_MODEL" \
+            --llm-api-key "$LLM_API_KEY" \
+            --max-iterations 30 \
+            --output-dir /tmp/oh-output \
+            --runtime docker \
+            2>&1 | tee /tmp/oh-resolve.log || true
+
+      - name: Apply patch and push
+        env:
+          ISSUE_NUM: ${{ steps.issue.outputs.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          if [ ! -f /tmp/oh-output/output.jsonl ]; then
+            echo "No resolver output found"
+            exit 0
+          fi
+
+          PATCH=$(python3 -c "
+          import json
+          with open('/tmp/oh-output/output.jsonl') as f:
+              for line in f:
+                  data = json.loads(line)
+                  if data.get('git_patch'):
+                      print(data['git_patch'])
+                      break
+          " 2>/dev/null || echo "")
+
+          if [ -z "$PATCH" ]; then
+            echo "No patch in resolver output"
+            exit 0
+          fi
+
+          # Get the PR branch and apply patch
+          PR_NUM="${{ github.event.issue.number }}"
+          BRANCH=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
+
+          if [ -n "$BRANCH" ]; then
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+          fi
+
+          # Apply patch with fallback methods
+          if echo "$PATCH" | git apply --allow-empty 2>/dev/null; then
+            echo "Patch applied cleanly"
+          elif echo "$PATCH" | git apply --3way 2>/dev/null; then
+            echo "Patch applied with 3-way merge"
+          elif echo "$PATCH" | git apply --reject 2>/dev/null; then
+            echo "::warning::Patch applied with rejections"
+            find . -name "*.rej" -exec rm {} \;
+          else
+            echo "::error::All patch methods failed"
+            exit 0
+          fi
+
+          # Ensure workflow files match latest main
+          git fetch origin main --quiet
+          git checkout origin/main -- .github/workflows/ 2>/dev/null || true
+          rm -rf .metron
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            if [ -n "$PAT_TOKEN" ]; then
+              git config --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+              git remote set-url origin "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git"
+            fi
+            git add -A
+            git commit -m "fix: apply repair from PR comment"
+            git push
+          fi
