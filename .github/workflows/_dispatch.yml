@@ -55,6 +55,76 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Preflight checks
+        if: steps.config.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRON_CONFIG_PATH: ${{ inputs.config-path }}
+          HAS_PAT: ${{ secrets.PAT_TOKEN && 'true' || 'false' }}
+          HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY && 'true' || 'false' }}
+          HAS_PORTKEY: ${{ secrets.PORTKEY_API_KEY && 'true' || 'false' }}
+          HAS_OPENAI: ${{ secrets.OPENAI_API_KEY && 'true' || 'false' }}
+          HAS_GEMINI: ${{ secrets.GEMINI_API_KEY && 'true' || 'false' }}
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          WARNINGS=""
+
+          # Check PAT_TOKEN (always required)
+          if [ "$HAS_PAT" != "true" ]; then
+            WARNINGS="${WARNINGS}\n- **PAT_TOKEN** secret missing — agent dispatch will fail"
+          fi
+
+          # Check per-harness secrets
+          python3 -c "
+          import sys, os
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents
+          cfg = load_config('${{ inputs.config-path }}')
+          agents = get_agents(cfg)
+          seen = set()
+          for a in agents:
+              h = a['harness']
+              if h in seen:
+                  continue
+              seen.add(h)
+              if h == 'claude':
+                  if os.environ.get('HAS_ANTHROPIC') != 'true' and os.environ.get('HAS_PORTKEY') != 'true':
+                      print('ANTHROPIC_API_KEY or PORTKEY_API_KEY (for claude)')
+              elif h == 'codex':
+                  if os.environ.get('HAS_OPENAI') != 'true':
+                      print('OPENAI_API_KEY (for codex)')
+              elif h == 'openhands':
+                  if os.environ.get('HAS_GEMINI') != 'true':
+                      print('GEMINI_API_KEY (for openhands)')
+          " | while read SECRET; do
+            WARNINGS="${WARNINGS}\n- **${SECRET}** secret missing — that agent will fail"
+          done
+
+          # Check Claude Code GitHub App
+          python3 -c "
+          import sys
+          sys.path.insert(0, '.metron/scripts')
+          from config_parser import load_config, get_agents
+          cfg = load_config('${{ inputs.config-path }}')
+          agents = get_agents(cfg)
+          for a in agents:
+              if a['harness'] == 'claude':
+                  print('has_claude')
+                  break
+          " | grep -q "has_claude" && {
+            # Try to check if Claude app is installed (best effort)
+            CLAUDE_APP=$(gh api /repos/${{ github.repository }}/installation 2>&1 || echo "not_found")
+            if echo "$CLAUDE_APP" | grep -q "not_found\|Not Found"; then
+              WARNINGS="${WARNINGS}\n- **Claude Code GitHub App** not installed — install at https://github.com/apps/claude"
+            fi
+          }
+
+          # Post warnings if any
+          if [ -n "$WARNINGS" ]; then
+            BODY=$(printf "⚠️ **Metron preflight warnings:**\n${WARNINGS}\n\nAgents will still be dispatched, but affected agents may fail.")
+            gh issue comment "$ISSUE_NUM" --body "$BODY"
+          fi
+
       - name: Post status table
         if: steps.config.outputs.skip == 'false'
         env:
