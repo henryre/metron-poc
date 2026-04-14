@@ -128,6 +128,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
           allowed_bots: "github-actions[bot]"
+          branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
       # Claude Code (attempt 1) — Portkey gateway
@@ -145,6 +146,7 @@ jobs:
           anthropic_api_key: ${{ secrets.PORTKEY_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
           allowed_bots: "github-actions[bot]"
+          branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
       - name: Wait before retry
@@ -168,6 +170,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
           allowed_bots: "github-actions[bot]"
+          branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
       # Claude Code (attempt 2) — Portkey gateway
@@ -188,6 +191,7 @@ jobs:
           anthropic_api_key: ${{ secrets.PORTKEY_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
           allowed_bots: "github-actions[bot]"
+          branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
       - name: Agent diagnostics
