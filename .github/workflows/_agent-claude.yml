@@ -69,6 +69,8 @@ jobs:
               f.write(f'branch_prefix={claude_agent[\"branch_prefix\"]}\n')
               f.write(f'agent_label={claude_agent[\"label\"]}\n')
               f.write(f'allowed_tools={tools_str}\n')
+              llm_provider = cfg.get('llm', {}).get('provider', 'anthropic')
+              f.write(f'llm_provider={llm_provider}\n')
           " || { echo "::error::Config parse failed"; exit 1; }
 
       # Copy metron scripts to /tmp so they survive if the working tree changes
@@ -114,9 +116,24 @@ jobs:
             "${{ steps.config.outputs.branch_prefix }}" \
             "${{ steps.config.outputs.agent_label }}"
 
+      # Claude Code (attempt 1) — direct Anthropic API
       - name: Run Claude Code (attempt 1)
-        if: steps.trigger.outputs.skip == 'false'
-        id: claude1
+        if: steps.trigger.outputs.skip == 'false' && steps.config.outputs.llm_provider != 'portkey'
+        id: claude1_direct
+        continue-on-error: true
+        uses: anthropics/claude-code-action@58dbe8ed6879f0d3b02ac295b20d5fdfe7733e0c
+        env:
+          ANTHROPIC_MODEL: ${{ steps.config.outputs.model_id }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          label_trigger: ${{ steps.config.outputs.ready_label }}
+          allowed_bots: "github-actions[bot]"
+          claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
+
+      # Claude Code (attempt 1) — Portkey gateway
+      - name: Run Claude Code (attempt 1)
+        if: steps.trigger.outputs.skip == 'false' && steps.config.outputs.llm_provider == 'portkey'
+        id: claude1_portkey
         continue-on-error: true
         uses: anthropics/claude-code-action@58dbe8ed6879f0d3b02ac295b20d5fdfe7733e0c
         env:
@@ -131,12 +148,35 @@ jobs:
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
       - name: Wait before retry
-        if: steps.claude1.outcome == 'failure' && github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
+        if: >-
+          (steps.claude1_direct.outcome == 'failure' || steps.claude1_portkey.outcome == 'failure') &&
+          github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
         run: echo "First attempt failed, waiting 60s..." && sleep 60
 
+      # Claude Code (attempt 2) — direct Anthropic API
       - name: Run Claude Code (attempt 2)
-        if: steps.claude1.outcome == 'failure' && github.event_name == 'issues' && steps.trigger.outputs.skip == 'false'
-        id: claude2
+        if: >-
+          steps.claude1_direct.outcome == 'failure' &&
+          github.event_name == 'issues' && steps.trigger.outputs.skip == 'false' &&
+          steps.config.outputs.llm_provider != 'portkey'
+        id: claude2_direct
+        continue-on-error: true
+        uses: anthropics/claude-code-action@58dbe8ed6879f0d3b02ac295b20d5fdfe7733e0c
+        env:
+          ANTHROPIC_MODEL: ${{ steps.config.outputs.model_id }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          label_trigger: ${{ steps.config.outputs.ready_label }}
+          allowed_bots: "github-actions[bot]"
+          claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
+
+      # Claude Code (attempt 2) — Portkey gateway
+      - name: Run Claude Code (attempt 2)
+        if: >-
+          steps.claude1_portkey.outcome == 'failure' &&
+          github.event_name == 'issues' && steps.trigger.outputs.skip == 'false' &&
+          steps.config.outputs.llm_provider == 'portkey'
+        id: claude2_portkey
         continue-on-error: true
         uses: anthropics/claude-code-action@58dbe8ed6879f0d3b02ac295b20d5fdfe7733e0c
         env:
