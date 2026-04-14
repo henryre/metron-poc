@@ -158,55 +158,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
-          PORTKEY_API_KEY: ${{ secrets.PORTKEY_API_KEY }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           ISSUE_NUM: ${{ github.event.issue.number }}
           METRON_CONFIG_PATH: ${{ inputs.config-path }}
         run: |
-          # Read LLM config for summary model
-          SUMMARY_MODEL=$(python3 -c "
-          import sys
-          sys.path.insert(0, '.metron/scripts')
-          from config_parser import load_config
-          cfg = load_config('${{ inputs.config-path }}')
-          print(cfg.get('llm', {}).get('summary_model', '@bedrock/global.anthropic.claude-sonnet-4-6'))
-          ")
 
-          # Parse agent letter and feedback with LLM
+          # Parse agent letter and feedback with regex (no LLM needed)
           PARSE_RESULT=$(python3 -c "
-          import json, os, urllib.request
+          import json, os, re
 
           comment = os.environ['COMMENT_BODY']
-          api_key = os.environ['PORTKEY_API_KEY']
-
-          body = json.dumps({
-              'model': '$SUMMARY_MODEL',
-              'max_tokens': 200,
-              'messages': [{'role': 'user', 'content': f'''Parse this feedback command. Extract which agent letter and the feedback.
-          Command: {comment}
-
-          Respond in JSON only: {{\"agent\": \"A\" or \"B\" or \"C\" or \"D\", \"feedback\": \"the feedback text\"}}
-          If unclear, default agent to \"A\".'''}],
-          })
-
-          req = urllib.request.Request(
-              'https://api.portkey.ai/v1/messages',
-              data=body.encode(),
-              headers={
-                  'Content-Type': 'application/json',
-                  'x-portkey-api-key': api_key,
-              },
-          )
-
-          with urllib.request.urlopen(req, timeout=15) as resp:
-              data = json.loads(resp.read())
-              content = data['content'][0]['text']
-              import re
-              match = re.search(r'\{.*\}', content, re.DOTALL)
-              if match:
-                  print(match.group(0))
-              else:
-                  print(json.dumps({'agent': 'A', 'feedback': comment.replace('/feedback', '').strip()}))
+          # Match: /feedback [agent] <letter> <feedback text>
+          m = re.match(r'/feedback\s+(?:agent\s+)?([A-Za-z])\s*(.*)', comment, re.DOTALL)
+          if m:
+              letter = m.group(1).upper()
+              feedback = m.group(2).strip()
+          else:
+              # Default: agent A, whole comment as feedback
+              letter = 'A'
+              feedback = comment.replace('/feedback', '').strip()
+          print(json.dumps({'agent': letter, 'feedback': feedback}))
           ")
 
           AGENT_LETTER=$(echo "$PARSE_RESULT" | jq -r '.agent')
