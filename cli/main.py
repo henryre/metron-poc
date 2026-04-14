@@ -11,7 +11,7 @@ TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 DEFAULT_AGENTS = {
     "claude": {
         "harness": "claude",
-        "model_id": "global.anthropic.claude-opus-4-6-v1",
+        "model_id": "claude-opus-4-6",
         "model_label": "opus-4-6",
         "mention": "@claude",
     },

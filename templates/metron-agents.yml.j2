@@ -8,6 +8,11 @@ on:
       agent:
         description: "Agent harness to run"
         required: true
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
 jobs:
   run:
     uses: {{ metron_repo }}/.github/workflows/_agents.yml@{{ metron_ref }}

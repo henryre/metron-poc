@@ -2,9 +2,23 @@ name: "Metron: Issue Dispatch"
 on:
   issues:
     types: [labeled, closed]
+permissions:
+  contents: write
+  issues: write
+  actions: write
+  pull-requests: write
+  id-token: write
 jobs:
   dispatch:
     uses: {{ metron_repo }}/.github/workflows/_dispatch.yml@{{ metron_ref }}
     secrets: inherit
     with:
       config-path: metron.toml
+{% if 'claude' in harnesses %}
+  claude:
+    if: github.event.action == 'labeled'
+    uses: {{ metron_repo }}/.github/workflows/_agent-claude.yml@{{ metron_ref }}
+    secrets: inherit
+    with:
+      config-path: metron.toml
+{% endif %}

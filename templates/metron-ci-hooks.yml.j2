@@ -4,6 +4,11 @@ on:
     workflows: {{ required_checks }}
     types: [completed]
   deployment_status:
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
 jobs:
   hooks:
     uses: {{ metron_repo }}/.github/workflows/_ci-hooks.yml@{{ metron_ref }}
