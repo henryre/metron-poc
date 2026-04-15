@@ -116,6 +116,36 @@ CORE_TOOLS = [
     "LS",
 ]
 
+# ---------------------------------------------------------------------------
+# Default patch filter patterns by runtime (for OpenHands patch application)
+# ---------------------------------------------------------------------------
+
+_COMMON_PATCH_FILTERS = [
+    "__pycache__/",
+    ".DS_Store",
+]
+
+RUNTIME_PATCH_FILTERS: dict[str, list[str]] = {
+    "node": [
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "node_modules/",
+        ".next/",
+        *_COMMON_PATCH_FILTERS,
+    ],
+    "python": [
+        "poetry.lock",
+        "uv.lock",
+        ".venv/",
+        "*.egg-info/",
+        *_COMMON_PATCH_FILTERS,
+    ],
+    "custom": [
+        *_COMMON_PATCH_FILTERS,
+    ],
+}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -224,6 +254,18 @@ def derive_allowed_tools(config: dict, agent: dict) -> list[str]:
     formatted = [f"Bash({t}:*)" for t in bash_tools]
     formatted.extend(CORE_TOOLS)
     return formatted
+
+
+def get_patch_filters(config: dict) -> list[str]:
+    """Return list of file patterns to strip from OpenHands patches.
+
+    Uses [build].patch_filter if set, otherwise defaults by runtime.
+    """
+    build = config.get("build", {})
+    if "patch_filter" in build:
+        return build["patch_filter"]
+    runtime = build.get("runtime", "custom")
+    return RUNTIME_PATCH_FILTERS.get(runtime, RUNTIME_PATCH_FILTERS["custom"])
 
 
 def derive_repair_instructions(config: dict) -> str:

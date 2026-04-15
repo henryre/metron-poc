@@ -240,7 +240,8 @@ jobs:
           python3 -c "
           import sys
           sys.path.insert(0, '.metron/scripts')
-          from config_parser import load_config, get_agents
+          from config_parser import load_config, get_agents, get_patch_filters
+          import json
 
           cfg = load_config('${{ inputs.config-path }}')
           agents = get_agents(cfg)
@@ -256,10 +257,13 @@ jobs:
               print('::error::No OpenHands agent found in config')
               import sys; sys.exit(1)
 
+          patch_filters = get_patch_filters(cfg)
+
           with open('$GITHUB_OUTPUT', 'a') as f:
               f.write(f'model_id={oh_agent[\"model_id\"]}\n')
               f.write(f'branch_prefix={oh_agent[\"branch_prefix\"]}\n')
               f.write(f'agent_label={oh_agent[\"label\"]}\n')
+              f.write(f'patch_filters={json.dumps(patch_filters)}\n')
           "
 
       - name: Close previous PRs
@@ -309,6 +313,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PATCH_FILTERS: ${{ steps.config.outputs.patch_filters }}
           METRON_CONFIG_PATH: ${{ inputs.config-path }}
         run: |
           if [ ! -f /tmp/oh-output/output.jsonl ]; then
@@ -318,24 +323,22 @@ jobs:
           fi
 
           PATCH=$(python3 -c "
-          import json, re
+          import json, os
+          filters = json.loads(os.environ.get('PATCH_FILTERS', '[]'))
           with open('/tmp/oh-output/output.jsonl') as f:
               for line in f:
                   data = json.loads(line)
                   if data.get('git_patch'):
                       patch = data['git_patch']
-                      # Filter out generated/lockfile diffs that cause apply failures
-                      filtered = []
-                      skip = False
-                      for pline in patch.splitlines(True):
-                          if pline.startswith('diff --git'):
-                              skip = any(f in pline for f in [
-                                  'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
-                                  'node_modules/', '.next/', '__pycache__/',
-                              ])
-                          if not skip:
-                              filtered.append(pline)
-                      print(''.join(filtered))
+                      if filters:
+                          filtered, skip = [], False
+                          for pline in patch.splitlines(True):
+                              if pline.startswith('diff --git'):
+                                  skip = any(f in pline for f in filters)
+                              if not skip:
+                                  filtered.append(pline)
+                          patch = ''.join(filtered)
+                      print(patch)
                       break
           " 2>/dev/null || echo "")
 
