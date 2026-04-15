@@ -104,7 +104,7 @@ jobs:
 
           echo "CI status: $CI_STATUS"
 
-          if [ "$CI_STATUS" = "pass" ] || [ "$CI_STATUS" = "no-checks" ]; then
+          if [ "$CI_STATUS" = "pass" ]; then
             # Merge now
             gh pr ready "$WINNER_PR" || true
             sleep 5
