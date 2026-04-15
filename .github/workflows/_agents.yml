@@ -318,12 +318,24 @@ jobs:
           fi
 
           PATCH=$(python3 -c "
-          import json
+          import json, re
           with open('/tmp/oh-output/output.jsonl') as f:
               for line in f:
                   data = json.loads(line)
                   if data.get('git_patch'):
-                      print(data['git_patch'])
+                      patch = data['git_patch']
+                      # Filter out generated/lockfile diffs that cause apply failures
+                      filtered = []
+                      skip = False
+                      for pline in patch.splitlines(True):
+                          if pline.startswith('diff --git'):
+                              skip = any(f in pline for f in [
+                                  'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+                                  'node_modules/', '.next/', '__pycache__/',
+                              ])
+                          if not skip:
+                              filtered.append(pline)
+                      print(''.join(filtered))
                       break
           " 2>/dev/null || echo "")
 
@@ -333,7 +345,7 @@ jobs:
             exit 0
           fi
 
-          echo "Patch found ($(echo "$PATCH" | wc -l) lines)"
+          echo "Patch found ($(echo "$PATCH" | wc -l) lines, after filtering lockfiles)"
 
           # Dry-run check for diagnostics
           if ! echo "$PATCH" | git apply --check 2>/dev/null; then
