@@ -101,32 +101,14 @@ jobs:
             [ -n "$SECRET" ] && WARNINGS="${WARNINGS}\n- **${SECRET}** secret missing — that agent will fail"
           done <<< "$MISSING_SECRETS"
 
-          # Check Claude Code GitHub App
-          python3 -c "
-          import sys
-          sys.path.insert(0, '.metron/scripts')
-          from config_parser import load_config, get_agents
-          cfg = load_config('${{ inputs.config-path }}')
-          agents = get_agents(cfg)
-          for a in agents:
-              if a['harness'] == 'claude':
-                  print('has_claude')
-                  break
-          " | grep -q "has_claude" && {
-            # Try to check if Claude app is installed (best effort)
-            CLAUDE_APP=$(gh api /repos/${{ github.repository }}/installation 2>&1 || echo "not_found")
-            if echo "$CLAUDE_APP" | grep -q "not_found\|Not Found"; then
-              WARNINGS="${WARNINGS}\n- **Claude Code GitHub App** not installed — install at https://github.com/apps/claude"
-            fi
-          }
-
-          # Check Actions workflow permissions (PR creation requires write + can_approve)
-          WORKFLOW_PERMS=$(gh api "repos/${{ github.repository }}/actions/permissions/workflow" --jq '.default_workflow_permissions' 2>/dev/null || echo "unknown")
+          # Check Actions workflow permissions (requires admin scope on PAT_TOKEN)
+          # Only warn on definitive responses; skip silently on API errors
+          WORKFLOW_PERMS=$(gh api "repos/${{ github.repository }}/actions/permissions/workflow" --jq '.default_workflow_permissions' 2>/dev/null || echo "")
           if [ "$WORKFLOW_PERMS" = "read" ]; then
-            WARNINGS="${WARNINGS}\n- **Workflow permissions** are read-only — set to Read+Write in Settings → Actions → General → Workflow permissions"
+            WARNINGS="${WARNINGS}\n- **Workflow permissions** are read-only — set to Read+Write in Settings → Actions → General"
           fi
-          CAN_CREATE_PR=$(gh api "repos/${{ github.repository }}/actions/permissions/workflow" --jq '.can_approve_pull_request_reviews' 2>/dev/null || echo "false")
-          if [ "$CAN_CREATE_PR" != "true" ]; then
+          CAN_CREATE_PR=$(gh api "repos/${{ github.repository }}/actions/permissions/workflow" --jq '.can_approve_pull_request_reviews' 2>/dev/null || echo "")
+          if [ "$CAN_CREATE_PR" = "false" ]; then
             WARNINGS="${WARNINGS}\n- **Allow GitHub Actions to create PRs** is disabled — enable in Settings → Actions → General"
           fi
 
