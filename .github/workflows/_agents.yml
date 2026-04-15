@@ -240,7 +240,7 @@ jobs:
           python3 -c "
           import sys
           sys.path.insert(0, '.metron/scripts')
-          from config_parser import load_config, get_agents, get_patch_filters, get_build_commands
+          from config_parser import load_config, get_agents, get_patch_filters
           import json
 
           cfg = load_config('${{ inputs.config-path }}')
@@ -258,14 +258,12 @@ jobs:
               import sys; sys.exit(1)
 
           patch_filters = get_patch_filters(cfg)
-          build = get_build_commands(cfg)
 
           with open('$GITHUB_OUTPUT', 'a') as f:
               f.write(f'model_id={oh_agent[\"model_id\"]}\n')
               f.write(f'branch_prefix={oh_agent[\"branch_prefix\"]}\n')
               f.write(f'agent_label={oh_agent[\"label\"]}\n')
               f.write(f'patch_filters={json.dumps(patch_filters)}\n')
-              f.write(f'runtime={build[\"runtime\"]}\n')
           "
 
       - name: Close previous PRs
@@ -277,11 +275,6 @@ jobs:
             "$ISSUE_NUM" \
             "${{ steps.config.outputs.branch_prefix }}" \
             "${{ steps.config.outputs.agent_label }}"
-
-      - uses: actions/setup-node@v4
-        if: steps.config.outputs.runtime == 'node'
-        with:
-          node-version: "20"
 
       - uses: actions/setup-python@v5
         with:
@@ -379,16 +372,6 @@ jobs:
             echo "::error::All patch methods failed"
             python3 .metron/scripts/agent_ops.py post-agent-result "$ISSUE_NUM" "${{ steps.config.outputs.agent_label }}" "" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             exit 0
-          fi
-
-          # If package.json was modified and lockfile was filtered, regen lockfile
-          RUNTIME="${{ steps.config.outputs.runtime }}"
-          if [ "$RUNTIME" = "node" ] && git diff --name-only | grep -q "package.json"; then
-            echo "package.json modified — regenerating lockfile"
-            npm install --package-lock-only 2>/dev/null || true
-          elif [ "$RUNTIME" = "python" ] && git diff --name-only | grep -q "pyproject.toml"; then
-            echo "pyproject.toml modified — regenerating lockfile"
-            pip install --dry-run -e . 2>/dev/null || true
           fi
 
           # Preserve metron scripts outside the working tree
