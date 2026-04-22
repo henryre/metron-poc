@@ -17,8 +17,53 @@ max_repair_attempts = 10
 max_ralph_loops = 3        # max full wipe-and-restart cycles (0 = disabled)
 ```
 
-Default is `0` (disabled) so existing users are unaffected. Loaded by
-`config_parser.py` alongside `max_repair_attempts`.
+Default is `0` (disabled) so existing users are unaffected.
+
+### Typed config via dataclasses
+
+Replace the raw dict returned by `load_lbm_config` with stdlib dataclasses.
+No external dependencies (pydantic would require `pip install` in every
+workflow, since scripts run as bare `python3` on GH Actions runners).
+
+```python
+@dataclass
+class AgentConfig:
+    label: str
+    harness: str
+    model_id: str
+    model_label: str
+    branch_prefix: str
+    name: str          # "Agent A", "Agent B", ...
+    mention: str
+
+@dataclass
+class ChecksConfig:
+    required: list[str]
+    repair_from: list[str]
+    max_repair_attempts: int = 10
+    max_ralph_loops: int = 0
+
+@dataclass
+class LLMConfig:
+    provider: str = "anthropic"
+    summary_model: str = "claude-sonnet-4-6"
+
+@dataclass
+class LBMConfig:
+    agents: list[AgentConfig]
+    checks: ChecksConfig
+    llm: LLMConfig
+```
+
+`load_lbm_config()` returns an `LBMConfig` instance instead of a dict.
+Existing code that does `config["max_repair_attempts"]` becomes
+`config.checks.max_repair_attempts` — clearer, discoverable, and
+type-checked by editors. Each dataclass has a `from_dict` classmethod
+that handles defaults.
+
+The existing `load_config()` / `load_agents()` convenience functions
+remain but return the new types. Existing callers in workflows that
+access dict keys will need updating — this is part of the migration.
 
 ## Counter Tracking
 
@@ -114,22 +159,22 @@ def cmd_dispatch_repair(args):
 
     repair_count = count_pr_comments(pr_num, "repair-attempt")
 
-    if repair_count < config["max_repair_attempts"]:
+    if repair_count < config.checks.max_repair_attempts:
         dispatch_repair_comment(pr_num, agent, failure_context)
         return
 
     # Repairs exhausted — try ralph restart
-    ralph_count = count_issue_comments(issue_num, "ralph-restart", agent["name"])
+    ralph_count = count_issue_comments(issue_num, "ralph-restart", agent.name)
 
-    if config["max_ralph_loops"] > 0 and ralph_count < config["max_ralph_loops"]:
-        summary = summarize_failed_attempt(pr_num, failure_context)
-        close_and_cleanup_pr(pr_num, f"Closing for ralph restart ({ralph_count + 1}/{config['max_ralph_loops']}).")
+    if config.checks.max_ralph_loops > 0 and ralph_count < config.checks.max_ralph_loops:
+        summary = summarize_failed_attempt(pr_num, failure_context, config.llm)
+        close_and_cleanup_pr(pr_num, f"Closing for ralph restart ({ralph_count + 1}/{config.checks.max_ralph_loops}).")
         post_ralph_restart(issue_num, agent, ralph_count + 1, pr_num, summary)
-        dispatch_agent(issue_num, agent["harness"])
+        dispatch_agent(issue_num, agent.harness)
         return
 
     # Truly exhausted
-    post_manual_intervention(issue_num, agent, pr_num, config)
+    post_manual_intervention(issue_num, agent, pr_num, config.checks)
 ```
 
 The existing repair-counting pattern (inline `gh pr view ... --jq ...`) should
@@ -148,7 +193,9 @@ consistency, but that's a cleanup — not a blocker for ralph.
 
 ### `scripts/config_parser.py`
 
-Extract `checks.max_ralph_loops` with default `0`.
+Refactor to return `LBMConfig` dataclass (defined here or in a shared
+`models.py`). The `from_dict` classmethods handle defaults and validation.
+`max_ralph_loops` gets default `0` in `ChecksConfig`.
 
 ### `templates/lbm.toml.j2`
 
