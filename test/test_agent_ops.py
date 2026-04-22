@@ -508,3 +508,38 @@ class TestDispatchAgent:
             "-f", "agent=claude-code",
             check=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# call_llm helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestCallLLM:
+    def test_returns_none_without_api_key(self):
+        from models import LLMConfig
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
+            result = agent_ops.call_llm("Hello", LLMConfig())
+        assert result is None
+
+    @patch("http.client.HTTPSConnection")
+    def test_returns_text_on_success(self, mock_conn_cls):
+        from models import LLMConfig
+        mock_resp = mock_conn_cls.return_value.getresponse.return_value
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps(
+            {"content": [{"text": "Summary here"}]}
+        ).encode()
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
+            result = agent_ops.call_llm("Summarize this", LLMConfig())
+        assert result == "Summary here"
+
+    @patch("http.client.HTTPSConnection")
+    def test_returns_none_on_http_error(self, mock_conn_cls):
+        from models import LLMConfig
+        mock_resp = mock_conn_cls.return_value.getresponse.return_value
+        mock_resp.status = 401
+        mock_resp.read.return_value = b'{"error": "unauthorized"}'
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
+            result = agent_ops.call_llm("Summarize this", LLMConfig())
+        assert result is None

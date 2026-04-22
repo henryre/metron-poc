@@ -30,7 +30,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from models import AgentConfig, LBMConfig
+from models import AgentConfig, LBMConfig, LLMConfig
 
 CONFIG_PATH = os.environ.get(
     "LBM_CONFIG_PATH",
@@ -315,6 +315,55 @@ Be specific and terse. One sentence per bullet. No filler.
 {"**Note: The diff was truncated. Some changes may not be visible.**" if was_truncated else ""}""",
             was_truncated,
         )
+
+
+# ---------------------------------------------------------------------------
+# LLM helpers
+# ---------------------------------------------------------------------------
+
+
+def call_llm(prompt: str, llm_config: LLMConfig) -> str | None:
+    """Call an LLM API and return the response text, or None on failure."""
+    import http.client
+
+    if llm_config.provider == "portkey":
+        api_key = os.environ.get("PORTKEY_API_KEY", "")
+        host = "api.portkey.ai"
+        headers = {
+            "Content-Type": "application/json",
+            "x-portkey-api-key": api_key,
+        }
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        host = "api.anthropic.com"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+
+    if not api_key:
+        return None
+
+    body = json.dumps({
+        "model": llm_config.summary_model,
+        "max_tokens": 2048,
+        "messages": [{"role": "user", "content": prompt}],
+    })
+
+    try:
+        conn = http.client.HTTPSConnection(host, timeout=60)
+        conn.request("POST", "/v1/messages", body=body.encode(), headers=headers)
+        resp = conn.getresponse()
+        resp_body = resp.read().decode()
+        if resp.status != 200:
+            print(f"LLM call failed: HTTP {resp.status} -- {resp_body}", file=sys.stderr)
+            return None
+        data = json.loads(resp_body)
+        return data["content"][0]["text"]
+    except Exception as e:
+        print(f"LLM call failed: {e}", file=sys.stderr)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -675,74 +724,19 @@ def cmd_summarize_pr(args: list[str]) -> None:
     if issue_number:
         issue_body = gh("issue", "view", issue_number, "--json", "body", "--jq", ".body", check=False)
 
-    # Read LLM config from lbm.toml
-    config_path = os.environ.get("LBM_CONFIG_PATH", "lbm.toml")
-    try:
-        from config_parser import load_config
-        cfg = load_config(config_path)
-        llm = cfg.get("llm", {})
-        provider = llm.get("provider", "anthropic")
-        model = llm.get("summary_model", "claude-sonnet-4-6")
-    except Exception:
-        provider = "anthropic"
-        model = "claude-sonnet-4-6"
+    config = load_config()
+    prompt, was_truncated = build_summary_prompt(diff, issue_body)
+    summary = call_llm(prompt, config.llm)
 
-    if provider == "portkey":
-        api_key = os.environ.get("PORTKEY_API_KEY", "")
-        host = "api.portkey.ai"
-        headers = {
-            "Content-Type": "application/json",
-            "x-portkey-api-key": api_key,
-        }
-    else:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        host = "api.anthropic.com"
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        }
-
-    if not api_key:
+    if not summary:
         print("")
         return
 
-    prompt, was_truncated = build_summary_prompt(diff, issue_body)
-
-    body = json.dumps(
-        {
-            "model": model,
-            "max_tokens": 2048,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    )
-
-    try:
-        import http.client
-
-        conn = http.client.HTTPSConnection(host, timeout=60)
-        conn.request(
-            "POST",
-            "/v1/messages",
-            body=body.encode(),
-            headers=headers,
-        )
-        resp = conn.getresponse()
-        resp_body = resp.read().decode()
-        if resp.status != 200:
-            print(f"LLM summary failed: HTTP {resp.status} -- {resp_body}", file=sys.stderr)
-            print("")
-            return
-        data = json.loads(resp_body)
-        summary = data["content"][0]["text"]
-        if was_truncated:
-            summary += "\n\n> **Note:** The PR diff was truncated for review. Some changes may not be reflected above."
-        if excluded_files:
-            summary += "\n\n> **Large files excluded from review:** " + ", ".join(excluded_files)
-        print(summary)
-    except Exception as e:
-        print(f"LLM summary failed: {e}", file=sys.stderr)
-        print("")
+    if was_truncated:
+        summary += "\n\n> **Note:** The PR diff was truncated for review. Some changes may not be reflected above."
+    if excluded_files:
+        summary += "\n\n> **Large files excluded from review:** " + ", ".join(excluded_files)
+    print(summary)
 
 
 def cmd_diagnostics(args: list[str]) -> None:
