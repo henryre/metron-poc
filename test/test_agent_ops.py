@@ -10,6 +10,7 @@ from unittest.mock import patch
 # Add scripts/ to path so we can import agent_ops
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import agent_ops
+from models import AgentConfig, ChecksConfig, LBMConfig, LLMConfig
 
 # ---------------------------------------------------------------------------
 # Pure function tests: agent lookup
@@ -19,19 +20,19 @@ import agent_ops
 class TestBranchToAgent:
     def test_exact_prefix(self, agents):
         result = agent_ops.branch_to_agent(agents, "claude/42-fix-bug")
-        assert result["label"] == "agent:claude"
+        assert result.label == "agent:claude"
 
     def test_case_insensitive(self, agents):
         result = agent_ops.branch_to_agent(agents, "Claude/42-fix-bug")
-        assert result["label"] == "agent:claude"
+        assert result.label == "agent:claude"
 
     def test_codex_prefix(self, agents):
         result = agent_ops.branch_to_agent(agents, "codex/10-add-feature")
-        assert result["label"] == "agent:codex"
+        assert result.label == "agent:codex"
 
     def test_openhands_prefix(self, agents):
         result = agent_ops.branch_to_agent(agents, "openhands/5-refactor")
-        assert result["label"] == "agent:openhands"
+        assert result.label == "agent:openhands"
 
     def test_no_match(self, agents):
         result = agent_ops.branch_to_agent(agents, "feature/something")
@@ -45,11 +46,11 @@ class TestBranchToAgent:
 class TestLabelToAgent:
     def test_exact_match(self, agents):
         result = agent_ops.label_to_agent(agents, "agent:claude")
-        assert result["name"] == "Agent A"
+        assert result.name == "Agent A"
 
     def test_codex(self, agents):
         result = agent_ops.label_to_agent(agents, "agent:codex")
-        assert result["name"] == "Agent B"
+        assert result.name == "Agent B"
 
     def test_no_match(self, agents):
         result = agent_ops.label_to_agent(agents, "agent:gemini")
@@ -59,19 +60,19 @@ class TestLabelToAgent:
 class TestNameToAgent:
     def test_full_name(self, agents):
         result = agent_ops.name_to_agent(agents, "Agent A")
-        assert result["label"] == "agent:claude"
+        assert result.label == "agent:claude"
 
     def test_letter_only(self, agents):
         result = agent_ops.name_to_agent(agents, "A")
-        assert result["label"] == "agent:claude"
+        assert result.label == "agent:claude"
 
     def test_lowercase(self, agents):
         result = agent_ops.name_to_agent(agents, "agent b")
-        assert result["label"] == "agent:codex"
+        assert result.label == "agent:codex"
 
     def test_letter_c(self, agents):
         result = agent_ops.name_to_agent(agents, "C")
-        assert result["label"] == "agent:openhands"
+        assert result.label == "agent:openhands"
 
     def test_no_match(self, agents):
         result = agent_ops.name_to_agent(agents, "D")
@@ -79,7 +80,7 @@ class TestNameToAgent:
 
     def test_whitespace(self, agents):
         result = agent_ops.name_to_agent(agents, "  B  ")
-        assert result["label"] == "agent:codex"
+        assert result.label == "agent:codex"
 
 
 # ---------------------------------------------------------------------------
@@ -204,12 +205,14 @@ class TestPostAgentResult:
     @patch("agent_ops.load_agents")
     def test_with_pr(self, mock_agents, mock_gh, mock_status):
         mock_agents.return_value = [
-            {"label": "agent:claude", "name": "Agent A", "branch_prefix": "claude/", "mention": "@claude"}
+            AgentConfig(label="agent:claude", name="Agent A", branch_prefix="claude/", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")
         ]
         mock_gh.return_value = ""
         agent_ops.cmd_post_agent_result(["42", "agent:claude", "10", "https://example.com/run"])
-        # Should label the PR
-        mock_gh.assert_any_call("pr", "edit", "10", "--add-label", "agent:claude", check=False)
+        # Should label the PR (with all three labels in one call)
+        pr_edit_calls = [c for c in mock_gh.call_args_list if c[0][:3] == ("pr", "edit", "10")]
+        assert len(pr_edit_calls) == 1
+        assert "agent:claude" in pr_edit_calls[0][0]
         # Should update status
         mock_status.assert_called_once()
         # Should post comment
@@ -220,7 +223,7 @@ class TestPostAgentResult:
     @patch("agent_ops.load_agents")
     def test_no_pr(self, mock_agents, mock_gh, mock_status):
         mock_agents.return_value = [
-            {"label": "agent:claude", "name": "Agent A", "branch_prefix": "claude/", "mention": "@claude"}
+            AgentConfig(label="agent:claude", name="Agent A", branch_prefix="claude/", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")
         ]
         agent_ops.cmd_post_agent_result(["42", "agent:claude", "", "https://example.com/run"])
         mock_status.assert_called_once()
@@ -232,15 +235,7 @@ class TestPostAgentResult:
     @patch("agent_ops.load_agents")
     def test_applies_three_labels(self, mock_agents, mock_gh, mock_status):
         mock_agents.return_value = [
-            {
-                "label": "agent:claude",
-                "name": "Agent A",
-                "branch_prefix": "claude/",
-                "mention": "@claude",
-                "harness": "claude",
-                "model_id": "claude-opus",
-                "model_label": "opus-4-6",
-            }
+            AgentConfig(label="agent:claude", name="Agent A", branch_prefix="claude/", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")
         ]
         mock_gh.return_value = ""
         agent_ops.cmd_post_agent_result(["42", "agent:claude", "10", "https://example.com/run"])
@@ -258,8 +253,8 @@ class TestClosingLosingPrs:
     @patch("agent_ops.load_agents")
     def test_closes_non_winner(self, mock_agents, mock_gh):
         mock_agents.return_value = [
-            {"label": "agent:claude", "branch_prefix": "claude/"},
-            {"label": "agent:codex", "branch_prefix": "codex/"},
+            AgentConfig(label="agent:claude", branch_prefix="claude/", name="Agent A", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6"),
+            AgentConfig(label="agent:codex", branch_prefix="codex/", name="Agent B", mention="@codex", harness="codex", model_id="gpt-5", model_label="gpt-5"),
         ]
         mock_gh.side_effect = [
             "10",  # claude PR
@@ -275,7 +270,7 @@ class TestClosingLosingPrs:
     @patch("agent_ops.gh")
     @patch("agent_ops.load_agents")
     def test_empty_list(self, mock_agents, mock_gh):
-        mock_agents.return_value = [{"label": "agent:claude", "branch_prefix": "claude/"}]
+        mock_agents.return_value = [AgentConfig(label="agent:claude", branch_prefix="claude/", name="Agent A", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")]
         mock_gh.return_value = ""
         agent_ops.cmd_close_losing_prs(["42", "10", "Agent A"])
         # Only list call, no close calls
@@ -286,10 +281,11 @@ class TestDispatchRepair:
     @patch("agent_ops.load_config")
     @patch("agent_ops.gh")
     def test_max_repairs_reached(self, mock_gh, mock_config):
-        mock_config.return_value = {
-            "max_repair_attempts": 2,
-            "agents": [{"label": "agent:claude", "branch_prefix": "claude/", "name": "Agent A", "mention": "@claude"}],
-        }
+        mock_config.return_value = LBMConfig(
+            agents=[AgentConfig(label="agent:claude", branch_prefix="claude/", name="Agent A", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")],
+            checks=ChecksConfig(max_repair_attempts=2),
+            llm=LLMConfig(),
+        )
         mock_gh.side_effect = [
             "claude/42-fix",  # branch
             "2",  # repair count = 2 (at max)
@@ -302,10 +298,11 @@ class TestDispatchRepair:
     @patch("agent_ops.load_config")
     @patch("agent_ops.gh")
     def test_not_agent_branch(self, mock_gh, mock_config):
-        mock_config.return_value = {
-            "max_repair_attempts": 2,
-            "agents": [{"label": "agent:claude", "branch_prefix": "claude/", "name": "Agent A", "mention": "@claude"}],
-        }
+        mock_config.return_value = LBMConfig(
+            agents=[AgentConfig(label="agent:claude", branch_prefix="claude/", name="Agent A", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")],
+            checks=ChecksConfig(max_repair_attempts=2),
+            llm=LLMConfig(),
+        )
         mock_gh.return_value = "feature/something"  # not an agent branch
         agent_ops.cmd_dispatch_repair(["10", "CI failed"])
         # Should exit early after branch lookup
@@ -316,7 +313,7 @@ class TestUpdateStatus:
     @patch("agent_ops.gh")
     @patch("agent_ops.load_agents")
     def test_updates_row(self, mock_agents, mock_gh):
-        mock_agents.return_value = [{"label": "agent:claude", "name": "Agent A"}]
+        mock_agents.return_value = [AgentConfig(label="agent:claude", name="Agent A", branch_prefix="claude/", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")]
         table_body = (
             "## Agent Implementations\n\n"
             "| Agent | Status | PR | Preview | Run |\n"
@@ -337,7 +334,7 @@ class TestUpdateStatus:
     @patch("agent_ops.gh")
     @patch("agent_ops.load_agents")
     def test_no_status_comment(self, mock_agents, mock_gh):
-        mock_agents.return_value = [{"label": "agent:claude", "name": "Agent A"}]
+        mock_agents.return_value = [AgentConfig(label="agent:claude", name="Agent A", branch_prefix="claude/", mention="@claude", harness="claude", model_id="claude-opus", model_label="opus-4-6")]
         mock_gh.return_value = ""
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/repo"}):
             agent_ops.cmd_update_status(["42", "agent:claude", "done", "10", "", ""])

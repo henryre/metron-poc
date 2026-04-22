@@ -2,36 +2,18 @@
 
 from __future__ import annotations
 
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
 import pytest
+from models import AgentConfig
 
 SAMPLE_AGENTS = [
-    {
-        "label": "agent:claude",
-        "branch_prefix": "claude/",
-        "name": "Agent A",
-        "mention": "@claude",
-        "harness": "claude",
-        "model_id": "global.anthropic.claude-opus-4-6-v1",
-        "model_label": "opus-4-6",
-    },
-    {
-        "label": "agent:codex",
-        "branch_prefix": "codex/",
-        "name": "Agent B",
-        "mention": "@codex",
-        "harness": "codex",
-        "model_id": "gpt-5.3-codex",
-        "model_label": "gpt-5.3",
-    },
-    {
-        "label": "agent:openhands",
-        "branch_prefix": "openhands/",
-        "name": "Agent C",
-        "mention": "@openhands-agent",
-        "harness": "openhands",
-        "model_id": "gemini/gemini-3.1-pro-preview",
-        "model_label": "gemini-3.1-pro",
-    },
+    AgentConfig(label="agent:claude", branch_prefix="claude/", name="Agent A", mention="@claude", harness="claude", model_id="global.anthropic.claude-opus-4-6-v1", model_label="opus-4-6"),
+    AgentConfig(label="agent:codex", branch_prefix="codex/", name="Agent B", mention="@codex", harness="codex", model_id="gpt-5.3-codex", model_label="gpt-5.3"),
+    AgentConfig(label="agent:openhands", branch_prefix="openhands/", name="Agent C", mention="@openhands-agent", harness="openhands", model_id="gemini/gemini-3.1-pro-preview", model_label="gemini-3.1-pro"),
 ]
 
 SAMPLE_STATUS_TABLE = """## Agent Implementations

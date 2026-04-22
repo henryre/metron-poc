@@ -30,6 +30,8 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
+from models import AgentConfig, LBMConfig
+
 CONFIG_PATH = os.environ.get(
     "LBM_CONFIG_PATH",
     os.path.join(os.getcwd(), "lbm.toml"),
@@ -51,74 +53,22 @@ def gh(*args: str, check: bool = True) -> str:
 # Config helpers
 # ---------------------------------------------------------------------------
 
-AGENT_NAME_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-
-def load_lbm_config(path: str | None = None) -> dict:
-    """Read lbm.toml and extract the agents section in the flat format.
-
-    Returns a dict with 'agents' and 'max_repair_attempts' keys,
-    matching the format the existing functions expect.
-    """
+def load_lbm_config(path: str | None = None) -> LBMConfig:
+    """Read lbm.toml and return a typed LBMConfig."""
     config_path = path or CONFIG_PATH
     with open(config_path, "rb") as f:
         parsed = tomllib.load(f)
-
-    harnesses = parsed.get("harnesses", {})
-    agents_raw = parsed.get("agents", [])
-    checks = parsed.get("checks", {})
-    max_repairs = checks.get("max_repair_attempts", 2)
-
-    agents = []
-    seen_prefixes: set[str] = set()
-
-    for i, entry in enumerate(agents_raw):
-        harness = entry["harness"]
-        model_id = entry["model_id"]
-        model_label = entry["model_label"]
-
-        if harness not in harnesses:
-            raise ValueError(f"Harness '{harness}' not defined in [harnesses]. Available: {list(harnesses.keys())}")
-
-        default_label = f"agent:{harness}-{model_label}"
-        default_prefix = f"{harness}-{model_label}/"
-
-        label = entry.get("override_label", default_label)
-        branch_prefix = entry.get("override_branch_prefix", default_prefix)
-
-        if branch_prefix in seen_prefixes:
-            raise ValueError(f"Duplicate branch_prefix '{branch_prefix}' -- each agent entry must have a unique prefix")
-        seen_prefixes.add(branch_prefix)
-
-        name_letter = AGENT_NAME_LETTERS[i] if i < len(AGENT_NAME_LETTERS) else str(i + 1)
-        name = f"Agent {name_letter}"
-
-        agents.append(
-            {
-                "label": label,
-                "harness": harness,
-                "model_id": model_id,
-                "model_label": model_label,
-                "branch_prefix": branch_prefix,
-                "name": name,
-                "mention": harnesses[harness].get("mention", ""),
-            }
-        )
-
-    return {
-        "agents": agents,
-        "max_repair_attempts": max_repairs,
-    }
+    return LBMConfig.from_parsed_toml(parsed)
 
 
-def load_config(path: str | None = None) -> dict:
-    """Load the config in the flat format the existing functions expect."""
+def load_config(path: str | None = None) -> LBMConfig:
+    """Load the config as a typed LBMConfig."""
     return load_lbm_config(path)
 
 
-def load_agents(path: str | None = None) -> list[dict]:
+def load_agents(path: str | None = None) -> list[AgentConfig]:
     """Load the agents list from config."""
-    return load_config(path)["agents"]
+    return load_config(path).agents
 
 
 # ---------------------------------------------------------------------------
@@ -126,29 +76,29 @@ def load_agents(path: str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def branch_to_agent(agents: list[dict], branch: str) -> dict | None:
+def branch_to_agent(agents: list[AgentConfig], branch: str) -> AgentConfig | None:
     """Find agent config by branch prefix."""
     for a in agents:
-        if branch.startswith(a["branch_prefix"]) or branch.lower().startswith(a["branch_prefix"].lower()):
+        if branch.startswith(a.branch_prefix) or branch.lower().startswith(a.branch_prefix.lower()):
             return a
     return None
 
 
-def label_to_agent(agents: list[dict], label: str) -> dict | None:
+def label_to_agent(agents: list[AgentConfig], label: str) -> AgentConfig | None:
     """Find agent config by label."""
     for a in agents:
-        if a["label"] == label:
+        if a.label == label:
             return a
     return None
 
 
-def name_to_agent(agents: list[dict], name: str) -> dict | None:
+def name_to_agent(agents: list[AgentConfig], name: str) -> AgentConfig | None:
     """Find agent config by name (e.g. 'A', 'Agent A', 'agent a')."""
     name = name.strip().upper()
     if not name.startswith("AGENT"):
         name = f"AGENT {name}"
     for a in agents:
-        if a["name"].upper() == name:
+        if a.name.upper() == name:
             return a
     return None
 
@@ -323,10 +273,11 @@ def cmd_lookup(args: list[str]) -> None:
 
     if agent:
         if field:
-            print(agent.get(field, ""))
+            print(getattr(agent, field, ""))
         else:
-            for k, v in agent.items():
-                print(f"{k}={v}")
+            from dataclasses import fields as dc_fields
+            for f in dc_fields(agent):
+                print(f"{f.name}={getattr(agent, f.name)}")
     else:
         sys.exit(1)
 
@@ -377,15 +328,15 @@ def cmd_post_agent_result(args: list[str]) -> None:
 
     agents = load_agents()
     agent = label_to_agent(agents, agent_label)
-    agent_name = agent["name"] if agent else "Agent"
+    agent_name = agent.name if agent else "Agent"
 
     if not pr_num:
         cmd_update_status([issue_num, agent_label, "no-changes", "", "", run_url])
         return
 
     # Apply three labels: agent (stable ID), harness, model
-    harness_label = f"harness:{agent['harness']}" if agent and agent.get("harness") else ""
-    model_label_tag = f"model:{agent['model_label']}" if agent and agent.get("model_label") else ""
+    harness_label = f"harness:{agent.harness}" if agent and agent.harness else ""
+    model_label_tag = f"model:{agent.model_label}" if agent and agent.model_label else ""
     all_labels = list(filter(None, [agent_label, harness_label, model_label_tag]))
     # Ensure labels exist on the repo (gh pr edit silently fails for missing labels)
     for lbl in all_labels:
@@ -420,7 +371,7 @@ def cmd_close_losing_prs(args: list[str]) -> None:
 
     agents = load_agents()
     for agent in agents:
-        prefix = agent["branch_prefix"]
+        prefix = agent.branch_prefix
         jq_filter = (
             f".[] | select("
             f'(.body | test("Implements #{issue_num}\\\\b")) and '
@@ -461,8 +412,8 @@ def cmd_dispatch_repair(args: list[str]) -> None:
     failure_context = args[1]
 
     config = load_config()
-    max_repairs = config.get("max_repair_attempts", 2)
-    agents = config["agents"]
+    max_repairs = config.checks.max_repair_attempts
+    agents = config.agents
 
     branch = gh("pr", "view", pr_num, "--json", "headRefName", "--jq", ".headRefName", check=False)
     if not branch:
@@ -474,8 +425,8 @@ def cmd_dispatch_repair(args: list[str]) -> None:
         print(f"Not an agent branch: {branch}")
         return
 
-    agent_name = agent["name"]
-    mention = agent.get("mention", "")
+    agent_name = agent.name
+    mention = agent.mention
 
     repair_count_str = gh(
         "pr",
@@ -553,7 +504,7 @@ def cmd_update_status(args: list[str]) -> None:
         print(f"Unknown agent label: {agent_label}", file=sys.stderr)
         sys.exit(1)
 
-    agent_name = agent["name"]
+    agent_name = agent.name
 
     comments_json = gh(
         "api",
@@ -742,7 +693,7 @@ def cmd_diagnostics(args: list[str]) -> None:
         agents = load_agents()
         agent = label_to_agent(agents, agent_label)
         if agent:
-            prefix = agent["branch_prefix"].rstrip("/")
+            prefix = agent.branch_prefix.rstrip("/")
             result = subprocess.run(["git", "branch", "-a"], capture_output=True, text=True)
             matching = [line.strip() for line in result.stdout.splitlines() if prefix in line]
             if matching:
@@ -776,11 +727,13 @@ def cmd_diagnostics(args: list[str]) -> None:
 
 def cmd_generate_config(args: list[str]) -> None:
     """Generate flat config output from lbm.toml (for debugging/validation)."""
+    from dataclasses import asdict
+
     check_only = "--check" in args
     config_path = args[0] if args and not args[0].startswith("--") else CONFIG_PATH
 
     config = load_lbm_config(config_path)
-    generated_json = json.dumps(config, indent=2) + "\n"
+    generated_json = json.dumps(asdict(config), indent=2) + "\n"
 
     if check_only:
         print("Config is valid.")
