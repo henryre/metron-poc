@@ -161,6 +161,57 @@ model_label = "y"
         assert any("ruff" in t for t in tools)
 
 
+class TestGetDeployConfig:
+    def test_returns_full_config(self):
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
+        toml = """
+[deploy]
+platform = "fly"
+preview_env = "Preview"
+app_prefix = "myapp-pr"
+region = "iad"
+registry = "ghcr"
+"""
+        config = tomllib.loads(toml)
+        result = config_parser.get_deploy_config(config)
+        assert result["platform"] == "fly"
+        assert result["app_prefix"] == "myapp-pr"
+        assert result["region"] == "iad"
+        assert result["registry"] == "ghcr"
+
+    def test_defaults_when_missing(self):
+        result = config_parser.get_deploy_config({})
+        assert result["platform"] == "none"
+        assert result["preview_env"] == "Preview"
+        assert result["app_prefix"] == ""
+        assert result["region"] == "iad"
+        assert result["registry"] == "ghcr"
+
+    def test_existing_vercel_config(self, config):
+        result = config_parser.get_deploy_config(config)
+        assert result["platform"] == "vercel"
+        assert result["preview_env"] == "Preview"
+
+
+class TestIsActiveDeployPlatform:
+    def test_fly_is_active(self):
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
+        config = tomllib.loads('[deploy]\nplatform = "fly"')
+        assert config_parser.is_active_deploy_platform(config) is True
+
+    def test_vercel_is_not_active(self, config):
+        assert config_parser.is_active_deploy_platform(config) is False
+
+    def test_none_is_not_active(self):
+        assert config_parser.is_active_deploy_platform({}) is False
+
+
 class TestDeriveRepairInstructions:
     def test_includes_build_commands(self, config):
         instructions = config_parser.derive_repair_instructions(config)

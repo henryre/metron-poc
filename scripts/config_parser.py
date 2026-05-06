@@ -234,6 +234,23 @@ def get_deploy_platform(config: dict) -> str:
     return deploy.get("platform", "none")
 
 
+def get_deploy_config(config: dict) -> dict:
+    """Return full deploy configuration with defaults."""
+    deploy = config.get("deploy", {})
+    return {
+        "platform": deploy.get("platform", "none"),
+        "preview_env": deploy.get("preview_env", "Preview"),
+        "app_prefix": deploy.get("app_prefix", ""),
+        "region": deploy.get("region", "iad"),
+        "registry": deploy.get("registry", "ghcr"),
+    }
+
+
+def is_active_deploy_platform(config: dict) -> bool:
+    """Return True if the platform requires LBM to orchestrate deploys."""
+    return get_deploy_platform(config) in ("fly", "railway")
+
+
 def derive_allowed_tools(config: dict, agent: dict) -> list[str]:
     """Generate Claude allowed-tools list based on build.runtime.
 
