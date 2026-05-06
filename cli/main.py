@@ -53,30 +53,44 @@ def cli():
 @cli.command()
 @click.option("--lbm-repo", default="henryre/lbm-poc", help="Central lbm repo")
 @click.option("--lbm-ref", default="v1", help="Version ref to pin")
-def init(lbm_repo, lbm_ref):
+@click.option("--from-json", "json_file", type=click.File("r"), default=None, help="Read config from JSON file instead of prompting")
+def init(lbm_repo, lbm_ref, json_file):
     """Initialize lbm in the current repository."""
     click.echo("LBM Setup\n")
 
-    # Prompts
-    runtime = click.prompt("Runtime", type=click.Choice(["node", "python", "go", "rust", "custom"]), default="node")
-    deploy_platform = click.prompt(
-        "Deploy platform", type=click.Choice(["vercel", "netlify", "fly", "railway", "none"]), default="none"
-    )
-    app_prefix = ""
-    deploy_region = "iad"
-    if deploy_platform in ("fly", "railway"):
-        app_prefix = click.prompt("App prefix (preview URLs will be {prefix}-{pr_number}.fly.dev)", default="app-pr")
-        deploy_region = click.prompt("Deploy region", default="iad")
-    database_orm = click.prompt("Database ORM", type=click.Choice(["prisma", "drizzle", "none"]), default="none")
+    if json_file is not None:
+        import json
+        config = json.load(json_file)
+        runtime = config["runtime"]
+        agents_list = config["agents"]
+        deploy_platform = config.get("deploy_platform", "none")
+        app_prefix = config.get("app_prefix", "")
+        deploy_region = config.get("deploy_region", "iad")
+        database_orm = config.get("database_orm", "none")
+        llm_provider = config.get("llm_provider", "anthropic")
+        available_agents = list(DEFAULT_AGENTS.keys())
+        selected_agents = [a.strip() for a in agents_list if a.strip() in available_agents]
+    else:
+        # Prompts
+        runtime = click.prompt("Runtime", type=click.Choice(["node", "python", "go", "rust", "custom"]), default="node")
+        deploy_platform = click.prompt(
+            "Deploy platform", type=click.Choice(["vercel", "netlify", "fly", "railway", "none"]), default="none"
+        )
+        app_prefix = ""
+        deploy_region = "iad"
+        if deploy_platform in ("fly", "railway"):
+            app_prefix = click.prompt("App prefix (preview URLs will be {prefix}-{pr_number}.fly.dev)", default="app-pr")
+            deploy_region = click.prompt("Deploy region", default="iad")
+        database_orm = click.prompt("Database ORM", type=click.Choice(["prisma", "drizzle", "none"]), default="none")
 
-    available_agents = list(DEFAULT_AGENTS.keys())
-    click.echo(f"\nAvailable agents: {', '.join(available_agents)}")
-    agent_choices = click.prompt("Which agents? (comma-separated)", default="claude,codex")
-    selected_agents = [a.strip() for a in agent_choices.split(",") if a.strip() in available_agents]
+        available_agents = list(DEFAULT_AGENTS.keys())
+        click.echo(f"\nAvailable agents: {', '.join(available_agents)}")
+        agent_choices = click.prompt("Which agents? (comma-separated)", default="claude,codex")
+        selected_agents = [a.strip() for a in agent_choices.split(",") if a.strip() in available_agents]
 
-    llm_provider = click.prompt(
-        "LLM provider (for PR summaries)", type=click.Choice(["portkey", "anthropic", "openai"]), default="portkey"
-    )
+        llm_provider = click.prompt(
+            "LLM provider (for PR summaries)", type=click.Choice(["portkey", "anthropic", "openai"]), default="portkey"
+        )
 
     # Build template context
     rt = RUNTIME_DEFAULTS.get(runtime, RUNTIME_DEFAULTS["custom"])
