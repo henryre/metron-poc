@@ -110,7 +110,6 @@ jobs:
         if: steps.trigger.outputs.skip == 'false' && steps.config.outputs.runtime == 'node'
         with:
           node-version: "20"
-          cache: "npm"
 
       - uses: actions/setup-python@v5
         if: steps.trigger.outputs.skip == 'false' && steps.config.outputs.runtime == 'python'
