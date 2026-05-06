@@ -1,0 +1,62 @@
+name: "LBM: Setup Target Repo"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        required: true
+        description: "owner/name of target repo"
+      config_json:
+        required: true
+        description: "JSON config for lbm init"
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout lbm-poc
+        uses: actions/checkout@v4
+
+      - name: Generate App token for target repo
+        id: target-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.LBM_APP_ID }}
+          private-key: ${{ secrets.LBM_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.inputs.target_repo }}
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.target_repo }}
+          token: ${{ steps.target-token.outputs.token }}
+          path: target
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CLI deps
+        run: pip install click jinja2
+
+      - name: Run lbm init
+        working-directory: target
+        run: |
+          echo '${{ github.event.inputs.config_json }}' | python ../cli/main.py init --from-json /dev/stdin
+
+      - name: Commit and push
+        working-directory: target
+        run: |
+          git config user.name "lbm-bot[bot]"
+          git config user.email "lbm-bot[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: initialize LBM configuration"
+            git push
+          fi
