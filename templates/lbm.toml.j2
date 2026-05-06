@@ -29,6 +29,11 @@ platform = "{{ deploy_platform }}"
 {% if deploy_platform != "none" %}
 preview_env = "Preview"
 {% endif %}
+{% if deploy_platform in ["fly", "railway"] %}
+app_prefix = "{{ app_prefix }}"
+region = "{{ deploy_region }}"
+registry = "ghcr"
+{% endif %}
 
 {% if database_orm != "none" %}
 [database]

@@ -60,8 +60,13 @@ def init(lbm_repo, lbm_ref):
     # Prompts
     runtime = click.prompt("Runtime", type=click.Choice(["node", "python", "go", "rust", "custom"]), default="node")
     deploy_platform = click.prompt(
-        "Deploy platform", type=click.Choice(["vercel", "netlify", "cloudflare", "none"]), default="none"
+        "Deploy platform", type=click.Choice(["vercel", "netlify", "fly", "railway", "none"]), default="none"
     )
+    app_prefix = ""
+    deploy_region = "iad"
+    if deploy_platform in ("fly", "railway"):
+        app_prefix = click.prompt("App prefix (preview URLs will be {prefix}-{pr_number}.fly.dev)", default="app-pr")
+        deploy_region = click.prompt("Deploy region", default="iad")
     database_orm = click.prompt("Database ORM", type=click.Choice(["prisma", "drizzle", "none"]), default="none")
 
     available_agents = list(DEFAULT_AGENTS.keys())
@@ -87,6 +92,8 @@ def init(lbm_repo, lbm_ref):
         "typecheck_cmd": rt["typecheck"],
         "build_cmd": rt["build"],
         "deploy_platform": deploy_platform,
+        "app_prefix": app_prefix,
+        "deploy_region": deploy_region,
         "database_orm": database_orm,
         "llm_provider": llm_provider,
         "summary_model": LLM_DEFAULTS.get(llm_provider, LLM_DEFAULTS["portkey"])["summary_model"],
@@ -135,6 +142,10 @@ def init(lbm_repo, lbm_ref):
         elif name == "openhands":
             click.echo("  GEMINI_API_KEY")
     click.echo("  PAT_TOKEN (GitHub PAT with repo scope)")
+    if deploy_platform == "fly":
+        click.echo("  FLY_API_TOKEN (Fly.io API token)")
+    elif deploy_platform == "railway":
+        click.echo("  RAILWAY_TOKEN (Railway API token)")
     if llm_provider == "portkey":
         click.echo("  PORTKEY_API_KEY (for PR summaries)")
     click.echo("\nCustomize AGENTS.md with your codebase-specific guidance.")
