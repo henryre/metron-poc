@@ -4,7 +4,7 @@ name: "LBM: Deploy to Fly.io"
 # Called by _ci-hooks.yml on CI success (deploy) or PR close (destroy).
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       action:
         description: "'deploy' or 'destroy'"

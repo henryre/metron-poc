@@ -231,25 +231,96 @@ jobs:
           ISSUE_NUM=$(echo "$PR_BODY" | grep -oP 'Implements #\K\d+' || echo "")
           echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch Fly deploy
+      - name: Deploy to Fly.io
         if: steps.check.outputs.is_active == 'true' && steps.check.outputs.is_agent == 'true' && steps.check.outputs.pr_number != ''
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ env.LBM_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: '_deploy-fly.yml',
-              ref: 'main',
-              inputs: {
-                action: 'deploy',
-                pr_number: '${{ steps.check.outputs.pr_number }}',
-                branch: '${{ steps.check.outputs.branch }}',
-                issue_number: '${{ steps.check.outputs.issue_number }}',
-                'config-path': '${{ inputs.config-path }}',
-              }
-            });
+        env:
+          GH_TOKEN: ${{ env.LBM_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          LBM_CONFIG_PATH: ${{ inputs.config-path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          PR_NUM="${{ steps.check.outputs.pr_number }}"
+          BRANCH="${{ steps.check.outputs.branch }}"
+          ISSUE_NUM="${{ steps.check.outputs.issue_number }}"
+
+          # Read deploy config
+          APP_PREFIX=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.lbm/scripts')
+          from config_parser import load_config, get_deploy_config
+          cfg = load_config('${{ inputs.config-path }}')
+          dc = get_deploy_config(cfg)
+          print(dc['app_prefix'])
+          ")
+          REGION=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.lbm/scripts')
+          from config_parser import load_config, get_deploy_config
+          cfg = load_config('${{ inputs.config-path }}')
+          dc = get_deploy_config(cfg)
+          print(dc['region'])
+          ")
+
+          APP_NAME="${APP_PREFIX}-${PR_NUM}"
+          IMAGE="ghcr.io/${{ github.repository }}:pr-${PR_NUM}"
+
+          echo "Building and pushing image ${IMAGE}..."
+
+          # Build and push image to GHCR
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build --target production -t "$IMAGE" .
+          docker push "$IMAGE"
+
+          # Install flyctl
+          curl -L https://fly.io/install.sh | sh
+          export PATH="$HOME/.fly/bin:$PATH"
+
+          # Create app if it doesn't exist
+          if ! flyctl apps list --json | grep -q "\"$APP_NAME\""; then
+            flyctl apps create "$APP_NAME" --org personal
+          fi
+
+          # Deploy
+          flyctl deploy \
+            --app "$APP_NAME" \
+            --image "$IMAGE" \
+            --primary-region "$REGION" \
+            --ha=false \
+            --vm-size shared-cpu-2x \
+            --vm-memory 1024 \
+            --env BACKEND_PORT=8001 \
+            --env FRONTEND_PORT=3782 \
+            2>&1 | tee /tmp/deploy.log
+
+          DEPLOY_EXIT=$?
+          if [ $DEPLOY_EXIT -ne 0 ]; then
+            LOGS=$(tail -50 /tmp/deploy.log)
+            python3 .lbm/scripts/agent_ops.py dispatch-repair "$PR_NUM" \
+              "Deployment to Fly.io failed. Deploy logs:
+          \`\`\`
+          ${LOGS}
+          \`\`\`"
+            exit 1
+          fi
+
+          # Set secrets on the app
+          flyctl secrets set --app "$APP_NAME" \
+            LLM_API_KEY="${{ secrets.LLM_API_KEY }}" \
+            EMBEDDING_API_KEY="${{ secrets.EMBEDDING_API_KEY }}" \
+            2>/dev/null || true
+
+          PREVIEW_URL="https://${APP_NAME}.fly.dev"
+          echo "Preview deployed: $PREVIEW_URL"
+
+          # Report preview URL
+          if [ -n "$ISSUE_NUM" ]; then
+            AGENT_INFO=$(python3 .lbm/scripts/agent_ops.py lookup branch-to-name "$BRANCH" 2>/dev/null || echo "")
+            if [ -n "$AGENT_INFO" ]; then
+              AGENT_LABEL=$(echo "$AGENT_INFO" | grep "^label=" | cut -d= -f2)
+              python3 .lbm/scripts/agent_ops.py update-status \
+                "$ISSUE_NUM" "$AGENT_LABEL" "preview" "$PR_NUM" "$PREVIEW_URL" || true
+            fi
+          fi
 
   # -----------------------------------------------------------------------
   # Cleanup — destroy preview on PR close (active platforms only)
@@ -306,23 +377,28 @@ jobs:
             echo "is_agent=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Dispatch Fly destroy
+      - name: Destroy Fly preview
         if: steps.check.outputs.is_active == 'true' && steps.check.outputs.is_agent == 'true'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ env.LBM_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: '_deploy-fly.yml',
-              ref: 'main',
-              inputs: {
-                action: 'destroy',
-                pr_number: '${{ github.event.pull_request.number }}',
-                'config-path': '${{ inputs.config-path }}',
-              }
-            });
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          LBM_CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          APP_PREFIX=$(python3 -c "
+          import sys
+          sys.path.insert(0, '.lbm/scripts')
+          from config_parser import load_config, get_deploy_config
+          cfg = load_config('${{ inputs.config-path }}')
+          dc = get_deploy_config(cfg)
+          print(dc['app_prefix'])
+          ")
+
+          APP_NAME="${APP_PREFIX}-${{ github.event.pull_request.number }}"
+
+          # Install flyctl
+          curl -L https://fly.io/install.sh | sh
+          export PATH="$HOME/.fly/bin:$PATH"
+
+          flyctl apps destroy "$APP_NAME" --yes 2>/dev/null || echo "App $APP_NAME not found"
 
   # -----------------------------------------------------------------------
   # Deploy failure — dispatch repair for Vercel/deploy failures
