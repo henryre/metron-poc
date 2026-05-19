@@ -26,6 +26,8 @@ on:
         required: false
       PORTKEY_API_KEY:
         required: false
+      PORTKEY_BEDROCK_SLUG:
+        required: false
 
 
 jobs:

@@ -26,11 +26,15 @@ on:
         required: false
       PORTKEY_API_KEY:
         required: false
+      PORTKEY_BEDROCK_SLUG:
+        required: false
       FLY_API_TOKEN:
         required: false
       VERCEL_TOKEN:
         required: false
       LLM_API_KEY:
+        required: false
+      EMBEDDING_API_KEY:
         required: false
 
 
