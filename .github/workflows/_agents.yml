@@ -163,6 +163,7 @@ jobs:
         with:
           prompt: ${{ steps.prompt.outputs.prompt }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          allow-bot-users: "lbm-bot"
 
       - name: Wait before retry
         if: steps.codex1.outcome == 'failure'
@@ -176,6 +177,7 @@ jobs:
         with:
           prompt: ${{ steps.prompt.outputs.prompt }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          allow-bot-users: "lbm-bot"
 
       - name: Agent diagnostics
         if: always()
