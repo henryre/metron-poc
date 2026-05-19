@@ -1,0 +1,23 @@
+name: "LBM: Agent Dispatch"
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to implement"
+        required: true
+      agent:
+        description: "Agent harness to run"
+        required: true
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+jobs:
+  run:
+    uses: henryre/lbm-poc/.github/workflows/_agents.yml@v1
+    secrets: inherit
+    with:
+      config-path: lbm.toml
+      issue_number: ${{ inputs.issue_number }}
+      agent: ${{ inputs.agent }}

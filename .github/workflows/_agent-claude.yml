@@ -24,6 +24,8 @@ on:
         required: false
       GEMINI_API_KEY:
         required: false
+      PORTKEY_API_KEY:
+        required: false
 
 
 jobs:

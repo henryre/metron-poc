@@ -24,6 +24,14 @@ on:
         required: false
       GEMINI_API_KEY:
         required: false
+      PORTKEY_API_KEY:
+        required: false
+      FLY_API_TOKEN:
+        required: false
+      VERCEL_TOKEN:
+        required: false
+      LLM_API_KEY:
+        required: false
 
 
 jobs:

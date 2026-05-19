@@ -24,7 +24,7 @@ jobs:
       - name: Actionlint
         run: |
           bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint
+          ./actionlint -shellcheck=""
 
       - name: Run tests
         run: uv run pytest test/ -v

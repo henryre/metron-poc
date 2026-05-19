@@ -1,0 +1,24 @@
+name: "LBM: Issue Dispatch"
+on:
+  issues:
+    types: [labeled, closed]
+permissions:
+  contents: write
+  issues: write
+  actions: write
+  pull-requests: write
+  id-token: write
+jobs:
+  dispatch:
+    uses: henryre/lbm-poc/.github/workflows/_dispatch.yml@v1
+    secrets: inherit
+    with:
+      config-path: lbm.toml
+
+  claude:
+    if: github.event.action == 'labeled'
+    uses: henryre/lbm-poc/.github/workflows/_agent-claude.yml@v1
+    secrets: inherit
+    with:
+      config-path: lbm.toml
+
