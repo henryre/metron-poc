@@ -1,5 +1,6 @@
 """LBM CLI — setup multi-agent dev infra for any repo."""
 
+import json
 from pathlib import Path
 
 import click
@@ -59,7 +60,6 @@ def init(lbm_repo, lbm_ref, json_file):
     click.echo("LBM Setup\n")
 
     if json_file is not None:
-        import json
         config = json.load(json_file)
         runtime = config["runtime"]
         agents_list = config["agents"]
@@ -68,6 +68,7 @@ def init(lbm_repo, lbm_ref, json_file):
         deploy_region = config.get("deploy_region", "iad")
         database_orm = config.get("database_orm", "none")
         llm_provider = config.get("llm_provider", "anthropic")
+        required_checks = config.get("required_checks", ["CI"])
         available_agents = list(DEFAULT_AGENTS.keys())
         selected_agents = [a.strip() for a in agents_list if a.strip() in available_agents]
     else:
@@ -91,6 +92,8 @@ def init(lbm_repo, lbm_ref, json_file):
         llm_provider = click.prompt(
             "LLM provider (for PR summaries)", type=click.Choice(["portkey", "anthropic", "openai"]), default="portkey"
         )
+        ci_name = click.prompt("CI workflow name (for pass/fail checks)", default="CI")
+        required_checks = [ci_name]
 
     # Build template context
     rt = RUNTIME_DEFAULTS.get(runtime, RUNTIME_DEFAULTS["custom"])
@@ -114,7 +117,7 @@ def init(lbm_repo, lbm_ref, json_file):
         "harnesses": harnesses,
         "agents": agents,
         "guidance_file": "AGENTS.md",
-        "required_checks": '["CI"]',
+        "required_checks": json.dumps(required_checks),
     }
 
     # Render templates
