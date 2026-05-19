@@ -18,6 +18,7 @@ on:
       agent:
         description: "Agent harness to run (codex, openhands)"
         required: true
+        type: string
     secrets:
       LBM_APP_ID:
         required: false
@@ -31,7 +32,6 @@ on:
         required: false
       GEMINI_API_KEY:
         required: false
-        type: string
 
 
 jobs:
