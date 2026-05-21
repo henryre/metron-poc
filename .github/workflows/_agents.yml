@@ -188,7 +188,7 @@ jobs:
       - name: Create branch, PR, and post result
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ env.LBM_TOKEN }}
           PAT_TOKEN: ${{ env.LBM_TOKEN }}
           LBM_CONFIG_PATH: ${{ inputs.config-path }}
         run: |
@@ -358,7 +358,7 @@ jobs:
       - name: Apply patch and create branch
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ env.LBM_TOKEN }}
           PAT_TOKEN: ${{ env.LBM_TOKEN }}
           PATCH_FILTERS: ${{ steps.config.outputs.patch_filters }}
           LBM_CONFIG_PATH: ${{ inputs.config-path }}
