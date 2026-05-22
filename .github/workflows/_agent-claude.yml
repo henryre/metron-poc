@@ -159,7 +159,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
-          allowed_bots: "github-actions[bot]"
+          allowed_bots: "github-actions[bot],lbm-bot[bot]"
           branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
@@ -177,7 +177,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.PORTKEY_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
-          allowed_bots: "github-actions[bot]"
+          allowed_bots: "github-actions[bot],lbm-bot[bot]"
           branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
@@ -201,7 +201,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
-          allowed_bots: "github-actions[bot]"
+          allowed_bots: "github-actions[bot],lbm-bot[bot]"
           branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
@@ -222,7 +222,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.PORTKEY_API_KEY }}
           label_trigger: ${{ steps.config.outputs.ready_label }}
-          allowed_bots: "github-actions[bot]"
+          allowed_bots: "github-actions[bot],lbm-bot[bot]"
           branch_prefix: ${{ steps.config.outputs.branch_prefix }}
           claude_args: "--allowedTools ${{ steps.config.outputs.allowed_tools }}"
 
